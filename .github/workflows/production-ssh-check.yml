@@ -33,6 +33,7 @@ jobs:
           docker compose version || true
           if sudo -n true; then echo 'Sudo: yes'; else echo 'Sudo: no'; fi
           df -h /home/zenity
+          ps -eo pid,etime,comm | grep -E 'docker|go|apt|pip|buildkit' | head -25 || true
           sudo docker ps --format 'CONTAINER {{.Names}} PORTS {{.Ports}}'
           sudo ss -ltn | grep -E ':(443|8082|5432|8000|11434) ' || true
           REMOTE
