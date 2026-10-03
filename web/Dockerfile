@@ -53,8 +53,6 @@ RUN apt install -y --no-install-recommends \
     python3-netaddr \
     software-properties-common
 
-RUN add-apt-repository ppa:mozillateam/ppa
-
 RUN ARCH=$(dpkg --print-architecture) \ 
     && curl -L https://go.dev/dl/go${GOVERSION}.linux-${ARCH}.tar.gz | tar -xzC /usr/local
 
