@@ -1,0 +1,105 @@
+name: Upgrade production to reNgine 3.0.0
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Prepare verified SSH connection
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ vars.SSH_HOST }}
+          SSH_PORT: ${{ vars.SSH_PORT }}
+          SSH_HOST_FINGERPRINT: ${{ vars.SSH_HOST_FINGERPRINT }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          test -n "$SSH_HOST_FINGERPRINT"
+          ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST" > "$RUNNER_TEMP/production-host-key"
+          actual=$(ssh-keygen -lf "$RUNNER_TEMP/production-host-key" -E sha256 | awk '{print $2}')
+          test "$actual" = "$SSH_HOST_FINGERPRINT"
+          cat "$RUNNER_TEMP/production-host-key" >> ~/.ssh/known_hosts
+
+      - name: Stage reNgine 3 source and build images
+        env:
+          SSH_HOST: ${{ vars.SSH_HOST }}
+          SSH_USER: ${{ vars.SSH_USER }}
+          SSH_PORT: ${{ vars.SSH_PORT }}
+          ADMIN_PASSWORD: ${{ secrets.RENGINE_ADMIN_PASSWORD }}
+        run: |
+          printf '%s' "$ADMIN_PASSWORD" > "$RUNNER_TEMP/rengine3-admin-password"
+          chmod 600 "$RUNNER_TEMP/rengine3-admin-password"
+          scp -P "$SSH_PORT" "$RUNNER_TEMP/rengine3-admin-password" "$SSH_USER@$SSH_HOST:/home/zenity/.rengine3-admin-password"
+          ssh -o BatchMode=yes -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" 'bash -se' <<'REMOTE' | tee "$RUNNER_TEMP/rengine3-build.log"
+          set -Eeuo pipefail
+          mem_gb=$((($(awk '/MemTotal/ {print $2}' /proc/meminfo) + 524288) / 1048576))
+          free_mb=$(df -Pm /home/zenity | awk 'NR==2 {print $4}')
+          test "$mem_gb" -ge 4 || { echo 'At least 4 GB RAM is required'; exit 1; }
+          test "$free_mb" -ge 10240 || { echo 'At least 10 GB free disk is required'; exit 1; }
+          source_dir=/home/zenity/rengine3-source
+          if [ ! -d "$source_dir/.git" ]; then
+            git clone --branch upgrade/rengine-3.0.0 https://github.com/pt-zenity/renginefixs.git "$source_dir" </dev/null
+          fi
+          git -C "$source_dir" fetch origin upgrade/rengine-3.0.0 </dev/null
+          git -C "$source_dir" reset --hard origin/upgrade/rengine-3.0.0 </dev/null
+          chmod 600 /home/zenity/.rengine3-admin-password
+          if [ ! -f /opt/rengine3/.env ]; then
+            sudo bash "$source_dir/install.sh" --domain 4sus.xyz --dir /opt/rengine3 --build --no-api-port --admin-user rengine --admin-email admin@localhost --admin-password "$(cat /home/zenity/.rengine3-admin-password)" --no-start --force </dev/null
+          fi
+          cd /opt/rengine3
+          sudo docker compose build </dev/null
+          echo BUILD_COMPLETE
+          REMOTE
+          grep -q '^BUILD_COMPLETE$' "$RUNNER_TEMP/rengine3-build.log"
+
+      - name: Back up legacy instance and switch domain
+        env:
+          SSH_HOST: ${{ vars.SSH_HOST }}
+          SSH_USER: ${{ vars.SSH_USER }}
+          SSH_PORT: ${{ vars.SSH_PORT }}
+        run: |
+          ssh -o BatchMode=yes -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" 'bash -se' <<'REMOTE' | tee "$RUNNER_TEMP/rengine3-cutover.log"
+          set -Eeuo pipefail
+          legacy=/home/zenity/renginefixs
+          backup=/home/zenity/backups/rengine2-$(date -u +%Y%m%dT%H%M%SZ)
+          mkdir -p "$backup"
+          chmod 700 "$backup"
+          cd "$legacy"
+          sudo docker compose exec --interactive=false -T db pg_dump -U rengine -d rengine -Fc </dev/null > "$backup/db.dump"
+          cp .env "$backup/legacy.env"
+          chmod 600 "$backup/legacy.env"
+          sudo docker run --rm -v rengine_scan_results:/data:ro -v "$backup":/backup alpine tar czf /backup/scan_results.tar.gz -C /data . </dev/null
+          echo "Legacy backup: $backup"
+          rollback() {
+            cd /opt/rengine3
+            sudo docker compose down </dev/null || true
+            cd "$legacy"
+            sudo docker compose up -d db redis web celery celery-beat proxy caddy </dev/null || true
+          }
+          trap rollback ERR
+          sudo docker compose down </dev/null
+          cd /opt/rengine3
+          sudo docker compose up -d --no-build </dev/null
+          healthy=0
+          for attempt in $(seq 1 90); do
+            if curl -fsS --connect-timeout 5 --max-time 10 --resolve 4sus.xyz:443:127.0.0.1 https://4sus.xyz/api/v1/health/health -o /dev/null; then
+              healthy=1
+              break
+            fi
+            sleep 3
+          done
+          test "$healthy" -eq 1
+          curl -fsS --resolve 4sus.xyz:443:127.0.0.1 https://4sus.xyz/ -o /dev/null
+          trap - ERR
+          sudo docker compose ps </dev/null
+          echo UPGRADE_COMPLETE
+          REMOTE
+          grep -q '^UPGRADE_COMPLETE$' "$RUNNER_TEMP/rengine3-cutover.log"
