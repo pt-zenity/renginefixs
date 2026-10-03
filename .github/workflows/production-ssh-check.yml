@@ -6,17 +6,26 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Connect to production server
+      - name: Inspect production server
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           SSH_HOST: ${{ vars.SSH_HOST }}
           SSH_USER: ${{ vars.SSH_USER }}
           SSH_PORT: ${{ vars.SSH_PORT }}
-          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
         run: |
           install -m 700 -d ~/.ssh
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
-          ssh -o BatchMode=yes -o ConnectTimeout=10 -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
-            'printf "Connected as: "; whoami; printf "Home: "; pwd; find /home/zenity -maxdepth 3 -name .git -type d -print'
+          ssh -o BatchMode=yes -o ConnectTimeout=10 -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" 'bash -s' <<'REMOTE'
+          set -e
+          whoami
+          pwd
+          find /home/zenity -maxdepth 2 -type d -print
+          . /etc/os-release
+          echo "OS: $PRETTY_NAME"
+          docker --version || true
+          docker compose version || true
+          if sudo -n true; then echo 'Sudo: yes'; else echo 'Sudo: no'; fi
+          df -h /home/zenity
+          REMOTE
