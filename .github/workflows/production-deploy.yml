@@ -1,0 +1,58 @@
+name: Deploy reNgine 3 to production
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Prepare verified SSH connection
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ vars.SSH_HOST }}
+          SSH_PORT: ${{ vars.SSH_PORT }}
+          SSH_HOST_FINGERPRINT: ${{ vars.SSH_HOST_FINGERPRINT }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          test -n "$SSH_HOST_FINGERPRINT"
+          ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST" > "$RUNNER_TEMP/production-host-key"
+          actual=$(ssh-keygen -lf "$RUNNER_TEMP/production-host-key" -E sha256 | awk '{print $2}')
+          test "$actual" = "$SSH_HOST_FINGERPRINT"
+          cat "$RUNNER_TEMP/production-host-key" >> ~/.ssh/known_hosts
+
+      - name: Build and deploy current repository
+        env:
+          SSH_HOST: ${{ vars.SSH_HOST }}
+          SSH_USER: ${{ vars.SSH_USER }}
+          SSH_PORT: ${{ vars.SSH_PORT }}
+        run: |
+          ssh -o BatchMode=yes -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" 'bash -se' <<'REMOTE' | tee "$RUNNER_TEMP/deploy.log"
+          set -Eeuo pipefail
+          source_dir=/home/zenity/rengine3-source
+          git -C "$source_dir" fetch origin master </dev/null
+          git -C "$source_dir" checkout -B master origin/master </dev/null
+          sudo bash "$source_dir/install.sh" --dir /opt/rengine3 --build --no-start </dev/null
+          cd /opt/rengine3
+          sudo docker compose build </dev/null
+          sudo docker compose up -d --no-build --remove-orphans </dev/null
+          healthy=0
+          for attempt in $(seq 1 90); do
+            if curl -fsS --connect-timeout 5 --max-time 10 --resolve 4sus.xyz:443:127.0.0.1 https://4sus.xyz/api/v1/health/health -o /dev/null; then
+              healthy=1
+              break
+            fi
+            sleep 3
+          done
+          test "$healthy" -eq 1
+          sudo docker compose ps </dev/null
+          echo DEPLOY_COMPLETE
+          REMOTE
+          grep -q '^DEPLOY_COMPLETE$' "$RUNNER_TEMP/deploy.log"
