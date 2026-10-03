@@ -121,8 +121,8 @@ services:
     restart: always
     image: nginx:alpine
     ports:
-      - 8082:8082/tcp
-      - 443:443/tcp
+      - 127.0.0.1:8082:8082/tcp
+      - ${RENGINE_HTTPS_PORT:-443}:443/tcp
     depends_on:
       - web
       - db

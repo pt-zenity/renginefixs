@@ -1,0 +1,101 @@
+name: Deploy reNgine to production
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ vars.SSH_HOST }}
+          SSH_PORT: ${{ vars.SSH_PORT }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Prepare production configuration
+        env:
+          ADMIN_PASSWORD: ${{ secrets.RENGINE_ADMIN_PASSWORD }}
+          DB_PASSWORD: ${{ secrets.RENGINE_DB_PASSWORD }}
+          CA_PASSWORD: ${{ secrets.RENGINE_CA_PASSWORD }}
+          SSH_HOST: ${{ vars.SSH_HOST }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          updates = {
+              'AUTHORITY_PASSWORD': os.environ['CA_PASSWORD'],
+              'DOMAIN_NAME': os.environ['SSH_HOST'],
+              'POSTGRES_PASSWORD': os.environ['DB_PASSWORD'],
+              'DJANGO_SUPERUSER_PASSWORD': os.environ['ADMIN_PASSWORD'],
+              'DJANGO_SUPERUSER_EMAIL': 'admin@localhost',
+              'RENGINE_HTTPS_PORT': '8443',
+          }
+          lines = []
+          for line in Path('.env').read_text().splitlines():
+              key = line.split('=', 1)[0]
+              if key in updates:
+                  line = key + '=' + updates.pop(key)
+              lines.append(line)
+          lines += [key + '=' + value for key, value in updates.items()]
+          dest = Path(os.environ['RUNNER_TEMP']) / 'rengine-production.env'
+          dest.write_text('\n'.join(lines) + '\n')
+          dest.chmod(0o600)
+          PY
+
+      - name: Sync application
+        env:
+          SSH_HOST: ${{ vars.SSH_HOST }}
+          SSH_USER: ${{ vars.SSH_USER }}
+          SSH_PORT: ${{ vars.SSH_PORT }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+        run: |
+          app_dir="${DEPLOY_PATH%/}/renginefixs"
+          ssh -o BatchMode=yes -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" bash -se -- "$app_dir" "$GITHUB_SHA" <<'REMOTE'
+          set -euo pipefail
+          app_dir=$1
+          revision=$2
+          if [ ! -d "$app_dir/.git" ]; then
+            git clone https://github.com/pt-zenity/renginefixs.git "$app_dir"
+          fi
+          git -C "$app_dir" fetch --depth 1 origin "$revision"
+          git -C "$app_dir" reset --hard "$revision"
+          REMOTE
+          scp -P "$SSH_PORT" "$RUNNER_TEMP/rengine-production.env" "$SSH_USER@$SSH_HOST:$app_dir/.env"
+
+      - name: Install and start reNgine
+        env:
+          SSH_HOST: ${{ vars.SSH_HOST }}
+          SSH_USER: ${{ vars.SSH_USER }}
+          SSH_PORT: ${{ vars.SSH_PORT }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+        run: |
+          app_dir="${DEPLOY_PATH%/}/renginefixs"
+          ssh -o BatchMode=yes -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" bash -se -- "$app_dir" <<'REMOTE'
+          set -euo pipefail
+          cd "$1"
+          sudo docker compose config --quiet
+          if [ ! -f secrets/certs/rengine.pem ]; then
+            sudo docker compose -f docker-compose.setup.yml run --rm certs
+          fi
+          sudo docker compose up -d --build db redis web celery celery-beat proxy
+          sudo docker compose exec -T web python3 manage.py migrate --noinput
+          if ! sudo docker compose exec -T web python3 manage.py shell -c 'from django.contrib.auth import get_user_model; print(get_user_model().objects.filter(username="rengine").exists())' | grep -q True; then
+            sudo docker compose exec -T web python3 manage.py createsuperuser --username rengine --email admin@localhost --noinput
+          fi
+          curl -kfsS --retry 12 --retry-delay 5 --retry-connrefused https://127.0.0.1:8443/ -o /dev/null
+          sudo docker compose ps
+          REMOTE

@@ -20,7 +20,10 @@ cert() {
      -subj "/C=${COUNTRY_CODE}/ST=${STATE}/L=${CITY}/O=${COMPANY}/CN=${COMMON_NAME}"
 
   # Creating SAN extension which is needed by modern browsers
-  echo "subjectAltName=DNS:${COMMON_NAME}" > client-ext.cnf
+  case "${COMMON_NAME}" in
+    *[!0-9.]* ) echo "subjectAltName=DNS:${COMMON_NAME}" > client-ext.cnf ;;
+    * ) echo "subjectAltName=IP:${COMMON_NAME}" > client-ext.cnf ;;
+  esac
 
   # Create a new certificate using our own CA
   openssl x509 -req -sha256 -passin pass:${AUTHORITY_PASSWORD} -days 3650 \
@@ -58,4 +61,3 @@ cert ${DOMAIN_NAME} rengine
 
 # Print all cert files
 ls -l /certs
-
