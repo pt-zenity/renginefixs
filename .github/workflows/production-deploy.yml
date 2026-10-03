@@ -89,7 +89,7 @@ jobs:
           DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
         run: |
           app_dir="${DEPLOY_PATH%/}/renginefixs"
-          ssh -o BatchMode=yes -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" bash -se -- "$app_dir" <<'REMOTE'
+          ssh -o BatchMode=yes -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" bash -se -- "$app_dir" <<'REMOTE' | tee "$RUNNER_TEMP/production-deploy.log"
           set -euo pipefail
           cd "$1"
           if ! command -v docker >/dev/null || ! sudo docker compose version >/dev/null 2>&1; then
@@ -97,15 +97,17 @@ jobs:
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2 git curl
             sudo systemctl enable --now docker
           fi
-          sudo docker compose config --quiet
+          sudo docker compose config --quiet </dev/null
           if [ ! -f secrets/certs/rengine.pem ]; then
-            sudo docker compose -f docker-compose.setup.yml run --rm certs
+            sudo docker compose -f docker-compose.setup.yml run --rm --interactive=false -T certs </dev/null
           fi
-          sudo docker compose up -d --build db redis web celery celery-beat proxy
-          sudo docker compose exec -T web python3 manage.py migrate --noinput
-          if ! sudo docker compose exec -T web python3 manage.py shell -c 'from django.contrib.auth import get_user_model; print(get_user_model().objects.filter(username="rengine").exists())' | grep -q True; then
-            sudo docker compose exec -T web python3 manage.py createsuperuser --username rengine --email admin@localhost --noinput
+          sudo docker compose up -d --build db redis web celery celery-beat proxy </dev/null
+          sudo docker compose exec --interactive=false -T web python3 manage.py migrate --noinput </dev/null
+          if ! sudo docker compose exec --interactive=false -T web python3 manage.py shell -c 'from django.contrib.auth import get_user_model; print(get_user_model().objects.filter(username="rengine").exists())' </dev/null | grep -q True; then
+            sudo docker compose exec --interactive=false -T web python3 manage.py createsuperuser --username rengine --email admin@localhost --noinput </dev/null
           fi
           curl -kfsS --retry 12 --retry-delay 5 --retry-connrefused https://127.0.0.1:8443/ -o /dev/null
-          sudo docker compose ps
+          sudo docker compose ps </dev/null
+          echo DEPLOY_COMPLETE
           REMOTE
+          grep -q '^DEPLOY_COMPLETE$' "$RUNNER_TEMP/production-deploy.log"
