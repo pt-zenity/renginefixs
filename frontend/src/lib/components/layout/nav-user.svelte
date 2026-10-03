@@ -1,0 +1,158 @@
+<script lang="ts">
+	import * as Avatar from '$lib/components/ui/avatar/index.js';
+	import * as DropdownMenu from '$lib/components/ui/dropdown-menu/index.js';
+	import * as Sidebar from '$lib/components/ui/sidebar/index.js';
+	import { Badge } from '$lib/components/ui/badge/index.js';
+	import { useSidebar } from '$lib/components/ui/sidebar/index.js';
+	import UserIcon from '@lucide/svelte/icons/user';
+	import Info from '@lucide/svelte/icons/info';
+	import ChevronsUpDownIcon from '@lucide/svelte/icons/chevrons-up-down';
+	import ShieldIcon from '@lucide/svelte/icons/shield';
+	import LogOutIcon from '@lucide/svelte/icons/log-out';
+	import SunIcon from '@lucide/svelte/icons/sun';
+	import MoonIcon from '@lucide/svelte/icons/moon';
+	import MonitorIcon from '@lucide/svelte/icons/monitor';
+	import { setMode, resetMode, userPrefersMode } from 'mode-watcher';
+	import * as Dialog from '$lib/components/ui/dialog/index.js';
+	import { VERSION } from '$lib/version.js';
+	import { Button } from '$lib/components/ui/button/index.js';
+	import { auth } from '$lib/stores/auth.svelte';
+	import { getInitials } from '$lib/utilities';
+	import { goto } from '$app/navigation';
+	import { ROUTES } from '$lib/config/routes';
+
+	let { user }: { user: { name: string; email: string; is_superuser: boolean } } = $props();
+	const sidebar = useSidebar();
+
+	let aboutDialogOpen = $state(false);
+
+	const handleLogout = async () => {
+		await auth.logout();
+	};
+</script>
+
+<Sidebar.Menu>
+	<Sidebar.MenuItem>
+		<DropdownMenu.Root>
+			<DropdownMenu.Trigger>
+				{#snippet child({ props })}
+					<Sidebar.MenuButton
+						size="lg"
+						class="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
+						{...props}
+					>
+						<Avatar.Root class="size-8 rounded-lg">
+							<Avatar.Fallback class="rounded-lg bg-primary text-primary-foreground">
+								{getInitials(user.name)}
+							</Avatar.Fallback>
+						</Avatar.Root>
+						<div class="grid flex-1 text-start text-sm leading-tight">
+							<span class="truncate font-medium">{user.name}</span>
+							<span class="truncate text-xs">{user.email}</span>
+						</div>
+						<ChevronsUpDownIcon class="ms-auto size-4" />
+					</Sidebar.MenuButton>
+				{/snippet}
+			</DropdownMenu.Trigger>
+			<DropdownMenu.Content
+				class="w-(--bits-dropdown-menu-anchor-width) min-w-56 rounded-lg"
+				side={sidebar.isMobile ? 'bottom' : 'right'}
+				align="end"
+				sideOffset={4}
+			>
+				<DropdownMenu.Label class="p-0 font-normal">
+					<div class="flex items-center gap-2 px-1 py-1.5 text-start text-sm">
+						<Avatar.Root class="size-8 rounded-lg">
+							<Avatar.Fallback class="rounded-lg bg-primary text-primary-foreground">
+								{getInitials(user.name)}
+							</Avatar.Fallback>
+						</Avatar.Root>
+						<div class="grid flex-1 text-start text-sm leading-tight">
+							<span class="truncate font-medium">{user.name}</span>
+							<span class="truncate text-xs">{user.email}</span>
+							{#if user.is_superuser}
+								<Badge variant="secondary" class="bg-primary/15 text-primary mt-1">
+									<ShieldIcon class="w-3 h-3 mr-1" />
+									Admin
+								</Badge>
+							{/if}
+						</div>
+					</div>
+				</DropdownMenu.Label>
+				<DropdownMenu.Separator />
+				<DropdownMenu.Group>
+					<DropdownMenu.Item onclick={() => goto(ROUTES.profile)}>
+						<UserIcon class="size-4" />
+						Profile
+					</DropdownMenu.Item>
+					<DropdownMenu.Item onclick={() => (aboutDialogOpen = true)}>
+						<Info class="size-4" />
+						About reNgine
+					</DropdownMenu.Item>
+				</DropdownMenu.Group>
+				<DropdownMenu.Separator />
+				<DropdownMenu.RadioGroup value={userPrefersMode.current}>
+					<DropdownMenu.RadioItem value="light" onclick={() => setMode('light')}>
+						<SunIcon class="size-4" />
+						Light
+					</DropdownMenu.RadioItem>
+					<DropdownMenu.RadioItem value="dark" onclick={() => setMode('dark')}>
+						<MoonIcon class="size-4" />
+						Dark
+					</DropdownMenu.RadioItem>
+					<DropdownMenu.RadioItem value="system" onclick={() => resetMode()}>
+						<MonitorIcon class="size-4" />
+						System
+					</DropdownMenu.RadioItem>
+				</DropdownMenu.RadioGroup>
+				<DropdownMenu.Separator />
+				<DropdownMenu.Item onclick={handleLogout}>
+					<LogOutIcon class="size-4" />
+					Log out
+				</DropdownMenu.Item>
+			</DropdownMenu.Content>
+		</DropdownMenu.Root>
+	</Sidebar.MenuItem>
+</Sidebar.Menu>
+
+<Dialog.Root bind:open={aboutDialogOpen}>
+	<Dialog.Content>
+		<Dialog.Header>
+			<Dialog.Title>About reNgine</Dialog.Title>
+			<Dialog.Description>Open-source attack surface management</Dialog.Description>
+		</Dialog.Header>
+		<div class="space-y-4 py-4">
+			<div class="space-y-2">
+				<h4 class="font-medium">Version</h4>
+				<p class="text-sm text-muted-foreground">reNgine {VERSION}</p>
+			</div>
+			<div class="space-y-2">
+				<h4 class="font-medium">GitHub</h4>
+				<a
+					href="https://github.com/yogeshojha/rengine"
+					target="_blank"
+					class="text-sm text-primary hover:text-primary/80"
+				>
+					github.com/yogeshojha/rengine
+				</a>
+			</div>
+			<div class="space-y-2">
+				<h4 class="font-medium">Wiki</h4>
+				<a
+					href="https://rengine.wiki"
+					target="_blank"
+					class="text-sm text-primary hover:text-primary/80"
+				>
+					rengine.wiki
+				</a>
+			</div>
+			<div class="space-y-2">
+				<h4 class="font-medium">License</h4>
+				<p class="text-sm text-muted-foreground">GNU General Public License v3.0</p>
+			</div>
+		</div>
+		<Dialog.Footer>
+			<Button variant="ghost" onclick={() => (aboutDialogOpen = false)}>Close</Button>
+		</Dialog.Footer>
+	</Dialog.Content>
+</Dialog.Root>

@@ -1,0 +1,40 @@
+repos:
+  # Python specific - Ruff
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.14
+    hooks:
+      - id: ruff
+        name: ruff-fix
+        args: [--fix, --exit-zero]
+        files: &packages ^(api|worker|shared|tools|stages|reports|interest|connectors|mcp|channels|toolbox|tests)/
+      - id: ruff-format
+        files: *packages
+      - id: ruff
+        name: ruff-check
+        args: [--exit-non-zero-on-fix]
+        files: *packages
+
+  # Frontend Svelte - Prettier
+  - repo: local
+    hooks:
+      - id: prettier
+        name: prettier-format
+        entry: bash -c 'cd frontend && npx prettier --write --ignore-unknown "${@#frontend/}"' --
+        language: system
+        files: ^frontend/.*\.(js|ts|svelte|json|css|scss|html)$
+        pass_filenames: true
+
+  # General
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+        # tsconfig and the editor settings are JSONC: comments, trailing commas
+        exclude: ^(\.vscode/|frontend/tsconfig\.json$)
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-merge-conflict
+      - id: detect-private-key

@@ -1,0 +1,53 @@
+export const SSEChannel = {
+	BROADCAST: 'broadcast',
+	PROJECT: 'project',
+	SCAN: 'scan',
+
+	project: (projectId: string): string => `project:${projectId}`,
+	scan: (scanId: string): string => `scan:${scanId}`
+} as const;
+
+export const SSEEventType = {
+	NOTIFICATION: 'notification',
+	ACTIVITY: 'activity',
+	SCAN: 'scan'
+} as const;
+
+export const SCAN_EVENT_KIND = {
+	SCAN_STARTED: 'scan_started',
+	SCAN_COMPLETED: 'scan_completed',
+	SCAN_FAILED: 'scan_failed',
+	SCAN_CANCELLED: 'scan_cancelled',
+	SCAN_PAUSED: 'scan_paused',
+	SCAN_RESUMED: 'scan_resumed',
+	STAGE_STARTED: 'stage_started',
+	STAGE_PROGRESS: 'stage_progress',
+	STAGE_COMPLETED: 'stage_completed',
+	COMMAND_STARTED: 'command_started',
+	COMMAND_FINISHED: 'command_finished',
+	RESULTS_FOUND: 'results_found',
+	INTEREST_READY: 'interest_ready'
+} as const;
+
+export type ScanEventKind = (typeof SCAN_EVENT_KIND)[keyof typeof SCAN_EVENT_KIND];
+
+export interface ScanEvent {
+	kind: ScanEventKind;
+	scan_id: string;
+	activity_id?: string | null;
+	stage?: string;
+	dimension?: string;
+	status?: string;
+	engine?: string;
+	title?: string;
+	message?: string;
+	source?: string | null;
+	counts?: Record<string, number>;
+	duration_seconds?: number | null;
+	error?: string | null;
+	command_id?: string | null;
+	tool?: string;
+	command?: string;
+	return_code?: number;
+	[key: string]: unknown;
+}

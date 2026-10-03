@@ -1,0 +1,156 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+from sqlalchemy import Text, and_, cast, exists, false, func, not_, or_, select
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import array as pg_array
+
+from shared.definitions.asset_query import FieldType, Op
+from shared.models.target import Target
+
+from .ast import Compare
+from .values import is_relative, like, moment, scaled_number, split_range
+
+_ONE_DAY = timedelta(days=1)
+_FLIPPED = {Op.GT: Op.LT, Op.GTE: Op.LTE, Op.LT: Op.GT, Op.LTE: Op.GTE}
+_TRUTHY = {"yes", "true", "1", "any", "present"}
+_FALSY = {"no", "false", "0", "none", "absent"}
+_EMPTY_ARRAY = "[]"
+
+
+def negate(expr):
+    return not_(func.coalesce(expr, false()))
+
+
+def threshold(col, op: Op, value):
+    if op is Op.GT:
+        return col > value
+    if op is Op.GTE:
+        return col >= value
+    if op is Op.LT:
+        return col < value
+    if op is Op.LTE:
+        return col <= value
+    if op is Op.NE:
+        return or_(col.is_(None), col != value)
+    return col == value
+
+
+def string_match(col, cmp: Compare):
+    if cmp.op is Op.MATCH:
+        return or_(*[col.ilike(like(v), escape="\\") for v in cmp.values])
+    lowered = [v.lower() for v in cmp.values]
+    if cmp.op is Op.EQ:
+        return func.lower(col).in_(lowered)
+    if cmp.op is Op.NE:
+        return or_(col.is_(None), negate(func.lower(col).in_(lowered)))
+    matched = or_(*[col.op("~*")(v) for v in cmp.values])
+    if cmp.op is Op.RE:
+        return matched
+    return or_(col.is_(None), negate(matched))
+
+
+def folded_match(col, cmp: Compare):
+    """`string_match` for a column stored lowercase."""
+    lowered = [v.lower() for v in cmp.values]
+    if cmp.op is Op.MATCH:
+        return or_(*[col.like(like(v), escape="\\") for v in lowered])
+    if cmp.op is Op.EQ:
+        return col.in_(lowered)
+    if cmp.op is Op.NE:
+        return or_(col.is_(None), negate(col.in_(lowered)))
+    return string_match(col, cmp)
+
+
+def target_match(column, cmp: Compare):
+    """Rows whose target id belongs to a target whose value matches."""
+    return column.in_(select(Target.id).where(string_match(Target.target_value, cmp)))
+
+
+def target_overlap(column, cmp: Compare):
+    """The same test where a row carries several targets, as a shared address does."""
+    wanted = (
+        select(func.array_agg(Target.id))
+        .where(string_match(Target.target_value, cmp))
+        .scalar_subquery()
+    )
+    return func.coalesce(column, pg_array([], type_=column.type)).op("&&")(
+        func.coalesce(wanted, pg_array([], type_=column.type))
+    )
+
+
+def number_match(col, cmp: Compare, coerce):
+    if cmp.op in (Op.MATCH, Op.EQ, Op.NE):
+        branches = []
+        for raw in cmp.values:
+            bounds = split_range(raw)
+            if bounds is None:
+                branches.append(col == coerce(raw))
+            else:
+                branches.append(
+                    and_(col >= coerce(bounds[0]), col <= coerce(bounds[1]))
+                )
+        matched = or_(*branches)
+        return or_(col.is_(None), negate(matched)) if cmp.op is Op.NE else matched
+    return threshold(col, cmp.op, coerce(cmp.values[0]))
+
+
+def date_match(col, cmp: Compare, now: datetime, *, future: bool):
+    raw = cmp.values[0]
+    instant = moment(raw, cmp.start, cmp.end)
+    if not is_relative(raw):
+        if cmp.op in (Op.MATCH, Op.EQ):
+            return and_(col >= instant, col < instant + _ONE_DAY)
+        return threshold(col, cmp.op, instant)
+    span = now - instant
+    boundary = now + span if future else now - span
+    if cmp.op in (Op.MATCH, Op.EQ):
+        return col <= boundary if future else col >= boundary
+    op = cmp.op if future else _FLIPPED.get(cmp.op, cmp.op)
+    return threshold(col, op, boundary)
+
+
+def json_array_match(col, cmp: Compare):
+    if cmp.op is Op.EQ:
+        return func.jsonb_exists_any(cast(col, JSONB), pg_array(list(cmp.values)))
+    if cmp.op in (Op.RE, Op.NRE):
+        element = (
+            func.jsonb_array_elements_text(cast(col, JSONB))
+            .table_valued("value")
+            .alias("element")
+        )
+        found = exists(
+            select(1)
+            .select_from(element)
+            .where(or_(*[element.c.value.op("~*")(v) for v in cmp.values]))
+        )
+        return negate(found) if cmp.op is Op.NRE else found
+    text = cast(col, Text)
+    matched = or_(*[text.ilike(like(v), escape="\\") for v in cmp.values])
+    if not any(v.lower() in _EMPTY_ARRAY for v in cmp.values):
+        matched = and_(text != _EMPTY_ARRAY, matched)
+    return negate(matched) if cmp.op is Op.NE else matched
+
+
+def tri_state(cmp: Compare) -> bool | None:
+    if len(cmp.values) != 1:
+        return None
+    value = cmp.values[0].lower()
+    if value in _TRUTHY:
+        return True
+    return False if value in _FALSY else None
+
+
+def int_coerce(cmp: Compare):
+    def coerce(raw: str) -> int:
+        return int(scaled_number(raw, FieldType.NUMBER, cmp.start, cmp.end))
+
+    return coerce
+
+
+def scaled_coerce(cmp: Compare, kind: FieldType):
+    def coerce(raw: str) -> float:
+        return scaled_number(raw, kind, cmp.start, cmp.end)
+
+    return coerce

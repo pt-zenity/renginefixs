@@ -1,0 +1,96 @@
+import Globe from '@lucide/svelte/icons/globe';
+import TerminalSquare from '@lucide/svelte/icons/terminal-square';
+import Database from '@lucide/svelte/icons/database';
+import Mail from '@lucide/svelte/icons/mail';
+import Server from '@lucide/svelte/icons/server';
+import CircleHelp from '@lucide/svelte/icons/circle-help';
+import type { IconComponent } from './icons';
+
+// mirrors shared/definitions/ports.py ServiceClass
+export enum ServiceClass {
+	WEB = 'web',
+	REMOTE = 'remote',
+	DATABASE = 'database',
+	MAIL = 'mail',
+	INFRA = 'infra',
+	OTHER = 'other'
+}
+
+export const SERVICE_CLASS_ORDER: ServiceClass[] = [
+	ServiceClass.WEB,
+	ServiceClass.REMOTE,
+	ServiceClass.DATABASE,
+	ServiceClass.MAIL,
+	ServiceClass.INFRA,
+	ServiceClass.OTHER
+];
+
+export const SERVICE_CLASS_LABELS: Record<string, string> = {
+	[ServiceClass.WEB]: 'Web',
+	[ServiceClass.REMOTE]: 'Remote access',
+	[ServiceClass.DATABASE]: 'Data store',
+	[ServiceClass.MAIL]: 'Mail',
+	[ServiceClass.INFRA]: 'Infrastructure',
+	[ServiceClass.OTHER]: 'Other'
+};
+
+export const SERVICE_CLASS_ICONS: Record<string, IconComponent> = {
+	[ServiceClass.WEB]: Globe,
+	[ServiceClass.REMOTE]: TerminalSquare,
+	[ServiceClass.DATABASE]: Database,
+	[ServiceClass.MAIL]: Mail,
+	[ServiceClass.INFRA]: Server,
+	[ServiceClass.OTHER]: CircleHelp
+};
+
+export const SERVICE_CLASS_FILL: Record<string, string> = {
+	[ServiceClass.WEB]: 'var(--chart-1)',
+	[ServiceClass.REMOTE]: 'var(--chart-4)',
+	[ServiceClass.DATABASE]: 'var(--chart-3)',
+	[ServiceClass.MAIL]: 'var(--chart-5)',
+	[ServiceClass.INFRA]: 'var(--chart-2)',
+	[ServiceClass.OTHER]: 'color-mix(in oklch, var(--muted-foreground) 35%, transparent)'
+};
+
+// mirrors shared/definitions/ports.py PortSource
+export enum PortSource {
+	NAABU = 'naabu',
+	INTERNETDB = 'internetdb',
+	HTTP_PROBE = 'http_probe',
+	BANNER = 'banner'
+}
+
+export const PORT_SOURCE_LABELS: Record<string, string> = {
+	naabu: 'Port scan',
+	internetdb: 'External scanner',
+	http_probe: 'HTTP probe',
+	banner: 'Service banner'
+};
+
+export const PORT_SOURCE_HELP: Record<string, string> = {
+	naabu: 'TCP connection completed by this scan',
+	internetdb: 'Reported by an internet-wide scanner and not confirmed by this scan',
+	http_probe: 'Answered an HTTP request from this scan',
+	banner: 'Returned a service banner to this scan'
+};
+
+export const SCAN_POLICY_LABELS: Record<string, string> = {
+	full: 'Scanned in full',
+	web: 'Web ports only',
+	skip: 'Not scanned'
+};
+
+export function serviceClassLabel(key: string | null | undefined): string {
+	return SERVICE_CLASS_LABELS[key ?? ''] ?? 'Other';
+}
+
+// mirrors shared/definitions/ports.py:SENSITIVE_PORTS
+export const SENSITIVE_PORTS = new Set([
+	21, 22, 23, 25, 53, 111, 135, 139, 389, 445, 512, 513, 514, 623, 873, 1080, 1433, 1521, 1723,
+	2049, 2181, 2375, 2376, 2379, 3306, 3389, 4369, 5432, 5601, 5672, 5900, 5901, 5984, 6379, 8086,
+	9042, 9092, 9160, 9200, 9300, 11211, 15672, 27017, 27018, 50000
+]);
+
+export function isSensitivePort(n: number): boolean {
+	return SENSITIVE_PORTS.has(n);
+}

@@ -1,0 +1,264 @@
+from __future__ import annotations
+
+import ipaddress
+from dataclasses import dataclass
+
+from sqlalchemy import select
+
+from shared.definitions.intensity import TransportTool
+from shared.definitions.ports import (
+    CDN_EDGE_PORTS,
+    PortProfile,
+    PortSource,
+    ScanPolicy,
+    profile_ports,
+)
+from shared.definitions.surface import SurfaceDimension
+from shared.enums.scan import AssetKind, Phase, StageGroup, StageRole
+from shared.enums.target import TargetType
+from shared.logging import get_logger
+from shared.models.ip_address import IpAddress
+from shared.services import ip_inventory, port_inventory
+from shared.services.port_inventory import ServiceObservation
+from shared.services.scope_filter import ip_excluded
+from shared.utils.net import is_registry_routable
+from stages.base import ALL_TARGETS, Stage, StageResult
+from stages.port_scan.config import PORT_THRESHOLD, PortScanConfig
+from tools.naabu.client import NaabuClient, NaabuError, NaabuOptions, port_args
+
+logger = get_logger(__name__)
+
+CDN_KINDS = ("cdn", "waf")
+
+_NAMED_SEED_TYPES = frozenset({TargetType.IP.value, TargetType.IP_RANGE.value})
+_WRITE_BATCH = 200
+
+
+@dataclass(frozen=True)
+class Decision:
+    policy: str
+    reason: str | None = None
+
+
+class PortScanStage(Stage):
+    name = "port_scan"
+    title = "Port Scan"
+    description = "Find listening TCP services on every address in scope."
+    phase = Phase.EXPANSION.value
+    depends_on = frozenset({"cdn_check", "passive_ports"})
+    group = StageGroup.SERVICES.value
+    role = StageRole.CAPABILITY.value
+    consumes = frozenset({AssetKind.ADDRESSES.value})
+    produces = frozenset({AssetKind.PORTS.value})
+    applies_to = ALL_TARGETS
+    tools = ("naabu",)
+    transport_tool = TransportTool.NAABU.value
+    config_model = PortScanConfig
+
+    def run(self) -> StageResult:
+        self._check_abort()
+        cfg = self.cfg
+        ip_inventory.ensure(
+            self.session,
+            scan_id=self.ctx.scan_id,
+            target_id=self.ctx.target_id,
+            project_id=self.ctx.project_id,
+        )
+        rows = self._addresses()
+        if not rows:
+            return StageResult(counts={"open_ports": 0, "scanned": 0})
+
+        plan = self._plan(rows, cfg)
+        self.session.commit()
+        full = [ip for ip, d in plan.items() if d.policy == ScanPolicy.FULL.value]
+        edge = [ip for ip, d in plan.items() if d.policy == ScanPolicy.WEB.value]
+        skipped = len(plan) - len(full) - len(edge)
+        if not full and not edge:
+            self.emit_progress(f"no address in scope to scan, {skipped} excluded")
+            return StageResult(
+                counts={"open_ports": 0, "scanned": 0, "skipped": skipped}
+            )
+
+        try:
+            client = NaabuClient(
+                options=NaabuOptions(
+                    rate=self.transport.rate or 1,
+                    concurrency=self.transport.threads,
+                    timeout=self.transport.timeout,
+                    retries=self.transport.retries,
+                    scan_type=cfg.scan_type,
+                    port_threshold=PORT_THRESHOLD,
+                    exclude_ports=cfg.exclude_ports,
+                    proxy_url=self.net_options().proxy_url,
+                    extra_args=self.ctx.resolved.tool_args("naabu"),
+                ),
+                recorder=self.ctx.recorder,
+            )
+        except NaabuError as exc:
+            logger.warning("naabu unavailable, skipping port scan")
+            return StageResult(warnings=[str(exc)], partial=True)
+
+        found: set[tuple[str, int, str]] = set()
+        failures: list[str] = []
+        replaced = [False]
+
+        def _write(batch: list[dict]) -> int:
+            written = port_inventory.upsert(
+                self.session,
+                scan_id=self.ctx.scan_id,
+                target_id=self.ctx.target_id,
+                project_id=self.ctx.project_id,
+                source=PortSource.NAABU.value,
+                observations=[
+                    ServiceObservation(
+                        ip=item["ip"],
+                        port=item["port"],
+                        protocol=item["protocol"],
+                        tls=item["tls"],
+                    )
+                    for item in batch
+                ],
+                replace=not replaced[0],
+            )
+            replaced[0] = True
+            return written
+
+        sink = self.results_sink(
+            SurfaceDimension.SERVICES.value, _write, rows=_WRITE_BATCH
+        )
+        if full:
+            self.emit_progress(f"scanning {len(full)} addresses on {self._label(cfg)}")
+            self._batch(
+                client, full, port_args(cfg.profile, cfg.ports), sink, found, failures
+            )
+            self._check_abort()
+        if edge:
+            self.emit_progress(
+                f"probing {len(edge)} CDN-fronted addresses on edge ports"
+            )
+            edge_ports = ["-p", ",".join(str(p) for p in CDN_EDGE_PORTS)]
+            self._batch(client, edge, edge_ports, sink, found, failures)
+            self._check_abort()
+        sink.close()
+        if not replaced[0]:
+            _write([])
+
+        count = len(found)
+        scanned = len(full) + len(edge)
+        if failures:
+            raise RuntimeError("; ".join(failures))
+        self.emit_progress(f"{count} open ports across {scanned} addresses")
+        warnings = [client.proxy_warning] if client.proxy_warning else []
+        return StageResult(
+            counts={
+                "open_ports": count,
+                "scanned": scanned,
+                "edge_only": len(edge),
+                "skipped": skipped,
+            },
+            warnings=warnings,
+            partial=bool(warnings),
+        )
+
+    def _batch(
+        self,
+        client: NaabuClient,
+        ips: list[str],
+        flags: list[str],
+        sink,
+        found: set[tuple[str, int, str]],
+        failures: list[str],
+    ) -> None:
+        """Stream one naabu run into the sink."""
+        try:
+            with client.stream_scan(
+                ips, flags, should_stop=self.ctx.is_aborted
+            ) as stream:
+                for item in stream.records:
+                    key = (item["ip"], item["port"], item["protocol"])
+                    if key in found:
+                        continue
+                    found.add(key)
+                    sink.add(item)
+                    if sink.pending == 0:
+                        self._check_abort()
+            sink.flush()
+            if (
+                stream.return_code != 0
+                and not stream.record_count
+                and not stream.stopped
+            ):
+                failures.append(
+                    stream.stderr.strip()[:300] or "naabu produced no output"
+                )
+        except NaabuError as exc:
+            failures.append(str(exc))
+
+    def _addresses(self) -> list[IpAddress]:
+        return list(
+            self.session.execute(
+                select(IpAddress)
+                .where(IpAddress.scan_id == self.ctx.scan_id)
+                .order_by(IpAddress.ip)
+                .limit(self.cfg.max_addresses)
+            )
+            .scalars()
+            .all()
+        )
+
+    def _named_private_seed(self) -> bool:
+        """The target names a private address or netblock."""
+        return self.ctx.target_type in _NAMED_SEED_TYPES and not is_registry_routable(
+            self.ctx.target_value
+        )
+
+    def _plan(self, rows: list[IpAddress], cfg: PortScanConfig) -> dict[str, Decision]:
+        excluded = self.ctx.resolved.excluded_ips or []
+        skip_private = cfg.skip_private and not self._named_private_seed()
+        plan: dict[str, Decision] = {}
+        for row in rows:
+            decision = self._decide(row, cfg, excluded, skip_private=skip_private)
+            plan[row.ip] = decision
+            row.scan_policy = decision.policy
+            row.scan_policy_reason = decision.reason
+            self.session.add(row)
+        return plan
+
+    @staticmethod
+    def _decide(
+        row: IpAddress,
+        cfg: PortScanConfig,
+        excluded: list[str],
+        *,
+        skip_private: bool,
+    ) -> Decision:
+        if excluded and ip_excluded(row.ip, excluded):
+            return Decision(ScanPolicy.SKIP.value, "scope")
+        if skip_private and _is_private(row.ip):
+            return Decision(ScanPolicy.SKIP.value, "private")
+        if row.is_alive is False:
+            return Decision(ScanPolicy.SKIP.value, "unreachable")
+        kind = row.cdn_type
+        if kind in CDN_KINDS:
+            policy = ScanPolicy(cfg.cdn_policy).value
+            return Decision(policy, "cdn")
+        if kind == "cloud" and not cfg.scan_cloud:
+            return Decision(ScanPolicy.WEB.value, "cloud")
+        return Decision(ScanPolicy.FULL.value, None)
+
+    @staticmethod
+    def _label(cfg: PortScanConfig) -> str:
+        explicit = profile_ports(cfg.profile)
+        if explicit:
+            return f"{len(explicit)} ports"
+        if cfg.profile == PortProfile.CUSTOM.value:
+            return cfg.ports or "the default port set"
+        return str(cfg.profile).replace("-", " ")
+
+
+def _is_private(value: str) -> bool:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return not address.is_global

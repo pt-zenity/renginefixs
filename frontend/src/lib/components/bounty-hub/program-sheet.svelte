@@ -1,0 +1,480 @@
+<script lang="ts">
+	import { untrack } from 'svelte';
+	import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
+	import RadarIcon from '@lucide/svelte/icons/radar';
+	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
+	import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert';
+	import { SvelteSet } from 'svelte/reactivity';
+	import { toast } from 'svelte-sonner';
+	import { Badge } from '$lib/components/ui/badge';
+	import { Button } from '$lib/components/ui/button';
+	import * as ScrollArea from '$lib/components/ui/scroll-area';
+	import * as Sheet from '$lib/components/ui/sheet';
+	import { Switch } from '$lib/components/ui/switch';
+	import CountTabs from '$lib/components/count-tabs.svelte';
+	import EmptyState from '$lib/components/empty-state.svelte';
+	import LoadingButton from '$lib/components/loading-button.svelte';
+	import RowSkeleton from '$lib/components/skeleton/row-skeleton.svelte';
+	import ImportDialog from './import-dialog.svelte';
+	import WatchDialog from './watch-dialog.svelte';
+	import ScopeRow from './scope-row.svelte';
+	import { bountyProgramsApi } from '$lib/api/bounty-programs';
+	import {
+		SOURCE_LABELS,
+		SOURCE_NOTES,
+		SUBMISSION_STATE_LABELS,
+		formatPayout
+	} from '$lib/config/bounty-programs';
+	import { bountyVocabulary } from '$lib/stores/bounty-vocabulary.svelte';
+	import { ROUTES } from '$lib/config/routes';
+	import { formatMoney } from '$lib/config/bounty-reports';
+	import { REFRESH_POLLS, REFRESH_POLL_MS } from '$lib/config/bounty-programs';
+	import { formatShortDate } from '$lib/utilities/dates';
+	import type { Watch } from '$lib/types/watch';
+	import {
+		ProgramState,
+		ScopeAccess,
+		ScopeState,
+		SubmissionState,
+		type BountyProgram,
+		type BountyProgramDetail
+	} from '$lib/types/bounty-program';
+
+	interface Props {
+		program: BountyProgram | null;
+		projectId: string | undefined;
+		open: boolean;
+		onOpenChange: (open: boolean) => void;
+		onImported: () => void;
+		onWatch?: (watch: Watch) => void;
+		onOpenWatch?: (watchId: string) => void;
+	}
+
+	let { program, projectId, open, onOpenChange, onImported, onWatch, onOpenWatch }: Props =
+		$props();
+	let watchOpen = $state(false);
+
+	let detail = $state<BountyProgramDetail | null>(null);
+	let loading = $state(false);
+	let loadError = $state<string | null>(null);
+	let importing = $state(false);
+	let syncingKey = $state<string | null>(null);
+	const syncing = $derived(!!program && syncingKey === `${program.platform}:${program.handle}`);
+	let fetchFailed = $state<string | null>(null);
+	const autoFetched = new SvelteSet<string>();
+	let tab = $state<string>('all');
+	let selected = new SvelteSet<string>();
+	let showOutOfScope = $state(false);
+	let importOpen = $state(false);
+
+	const unfetched = (d: BountyProgramDetail) =>
+		!d.scopes_synced_at && d.scope_access !== ScopeAccess.Denied;
+	const isCurrent = (handle: string, platform: string) =>
+		open && program?.handle === handle && program?.platform === platform;
+
+	function apply(d: BountyProgramDetail) {
+		detail = d;
+		loadError = null;
+		selected.clear();
+		for (const s of d.scopes) {
+			if (s.importable && !s.already_target && s.scope_state === ScopeState.InScope) {
+				selected.add(s.id);
+			}
+		}
+	}
+
+	async function load(handle: string, platform: string) {
+		loading = true;
+		try {
+			const d = await bountyProgramsApi.detail(handle, projectId, null, platform);
+			if (!isCurrent(handle, platform)) return;
+			apply(d);
+			const key = `${platform}:${handle}`;
+			if (unfetched(d) && !autoFetched.has(key)) {
+				autoFetched.add(key);
+				void fetchScope(handle, platform);
+			}
+		} catch (error) {
+			if (!isCurrent(handle, platform)) return;
+			loadError = error instanceof Error ? error.message : 'Request failed.';
+			toast.error(error instanceof Error ? error.message : 'Program not loaded');
+			detail = null;
+		} finally {
+			loading = false;
+		}
+	}
+
+	$effect(() => {
+		untrack(() => bountyVocabulary.load());
+	});
+
+	$effect(() => {
+		const handle = program?.handle;
+		const platform = program?.platform;
+		if (!open || !handle || !platform) return;
+		tab = 'all';
+		showOutOfScope = false;
+		loadError = null;
+		fetchFailed = null;
+		void load(handle, platform);
+	});
+
+	const scopes = $derived(detail?.scopes ?? []);
+	const payout = $derived(
+		program ? formatPayout(program.min_payout, program.max_payout, program.payout_currency) : null
+	);
+	const visible = $derived(tab === 'all' ? scopes : scopes.filter((s) => s.scope_state === tab));
+	const counts = $derived({
+		all: scopes.length,
+		[ScopeState.InScope]: detail?.in_scope_count ?? 0,
+		[ScopeState.OutOfScope]: detail?.out_of_scope_count ?? 0
+	});
+	const selectedOutOfScope = $derived(
+		scopes.filter((s) => selected.has(s.id) && s.scope_state === ScopeState.OutOfScope).length
+	);
+	const outOfScopeImportable = $derived(
+		scopes.filter(
+			(s) => s.scope_state === ScopeState.OutOfScope && s.importable && !s.already_target
+		).length
+	);
+	const unreachableEntries = $derived(Object.entries(detail?.unreachable ?? {}));
+	const unreachableTotal = $derived(unreachableEntries.reduce((n, [, v]) => n + v, 0));
+
+	function toggle(id: string) {
+		if (selected.has(id)) selected.delete(id);
+		else selected.add(id);
+	}
+
+	function setAllowOutOfScope(value: boolean) {
+		showOutOfScope = value;
+		if (value) return;
+		for (const s of scopes) {
+			if (s.scope_state === ScopeState.OutOfScope) selected.delete(s.id);
+		}
+	}
+
+	function selectAllVisible() {
+		for (const s of visible) {
+			if (!s.importable || s.already_target) continue;
+			if (s.scope_state === ScopeState.OutOfScope && !showOutOfScope) continue;
+			selected.add(s.id);
+		}
+	}
+
+	async function runImport(options: {
+		groupByProgram: boolean;
+		organizationName: string;
+		tags: string[];
+	}) {
+		if (!program || !projectId || selected.size === 0) return;
+		importing = true;
+		try {
+			const result = await bountyProgramsApi.importScopes(
+				program.handle,
+				projectId,
+				[...selected],
+				selectedOutOfScope > 0,
+				options.groupByProgram,
+				options.organizationName,
+				options.tags,
+				program.platform
+			);
+			const created = result.created.length;
+			const grouped = result.organization ? ` under ${result.organization.name}` : '';
+			toast.success(
+				created > 0
+					? `Added ${created} ${created === 1 ? 'target' : 'targets'}${grouped}`
+					: `No targets added. Each selected asset is a target${grouped}`
+			);
+			importOpen = false;
+			await load(program.handle, program.platform);
+			onImported();
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : 'Targets not added');
+		} finally {
+			importing = false;
+		}
+	}
+
+	async function fetchScope(handle: string, platform: string) {
+		const before = detail?.scopes_synced_at ?? null;
+		const key = `${platform}:${handle}`;
+		syncingKey = key;
+		fetchFailed = null;
+		try {
+			await bountyProgramsApi.syncProgram(handle, platform);
+			for (let i = 0; i < REFRESH_POLLS; i++) {
+				await new Promise((r) => setTimeout(r, REFRESH_POLL_MS));
+				if (!isCurrent(handle, platform)) return;
+				const d = await bountyProgramsApi
+					.detail(handle, projectId, null, platform)
+					.catch(() => null);
+				if (!d) continue;
+				if (d.scopes_synced_at !== before || d.scope_access === ScopeAccess.Denied) {
+					apply(d);
+					onImported();
+					return;
+				}
+			}
+			fetchFailed = 'Scope refresh running.';
+		} catch (error) {
+			if (isCurrent(handle, platform))
+				fetchFailed = error instanceof Error ? error.message : 'Scope not refreshed';
+		} finally {
+			if (syncingKey === key) syncingKey = null;
+		}
+	}
+
+	function refreshScope() {
+		if (program) void fetchScope(program.handle, program.platform);
+	}
+</script>
+
+<Sheet.Root {open} {onOpenChange}>
+	<Sheet.Content class="flex w-full flex-col gap-0 p-0 sm:max-w-2xl">
+		{#if program}
+			<Sheet.Header class="gap-2 border-b p-4">
+				<Sheet.Title class="flex flex-wrap items-center gap-2">
+					<span class="min-w-0 truncate">{program.name}</span>
+					{#if program.program_state === ProgramState.Private}
+						<Badge variant="info">{program.raw_state_label}</Badge>
+					{:else if program.joined}
+						<Badge variant="outline" class="text-muted-foreground">Joined</Badge>
+					{/if}
+					<Badge variant={program.offers_bounties ? 'default' : 'secondary'}>
+						{program.offers_bounties ? 'Bounty' : 'VDP'}
+					</Badge>
+					{#if program.submission_state !== SubmissionState.Unknown}
+						<Badge variant="outline" class="text-muted-foreground">
+							{SUBMISSION_STATE_LABELS[program.submission_state]}
+						</Badge>
+					{/if}
+					{#if payout}
+						<Badge variant="outline" class="tabular-nums">{payout}</Badge>
+					{/if}
+				</Sheet.Title>
+				<Sheet.Description class="flex flex-wrap items-center gap-x-3 gap-y-1">
+					<a
+						href={program.url ?? bountyVocabulary.url(program.platform)}
+						target="_blank"
+						rel="noreferrer noopener"
+						class="inline-flex items-center gap-1 font-mono text-xs hover:text-primary"
+					>
+						@{program.handle}
+						<ExternalLinkIcon class="size-3" />
+					</a>
+					{#if program.reports_for_user}
+						{#if bountyVocabulary.platform(program.platform)?.tracks_reports}
+							<a
+								href={ROUTES.bountyReports(program.platform, program.handle)}
+								class="text-xs text-foreground hover:text-primary"
+							>
+								{program.reports_for_user}
+								{program.reports_for_user === 1 ? 'report' : 'reports'}{program.earnings_for_user
+									? ` · ${formatMoney(program.earnings_for_user, program.currency?.toUpperCase() || 'USD')} earned`
+									: ''}
+							</a>
+						{:else}
+							<span class="text-xs">{program.reports_for_user} reports from this account</span>
+						{/if}
+					{/if}
+					{#if detail?.scopes_synced_at}
+						<span class="text-xs">Scope read {formatShortDate(detail.scopes_synced_at)}</span>
+					{/if}
+					{#if program.requires_2fa}
+						<span class="text-xs">2FA required</span>
+					{/if}
+				</Sheet.Description>
+				<div class="flex flex-wrap items-center gap-2 pt-1">
+					{#if program.watched && program.watch_id}
+						<Button
+							size="sm"
+							variant="outline"
+							onclick={() => onOpenWatch?.(program.watch_id ?? '')}
+						>
+							<RadarIcon class="mr-1.5 size-3.5" />
+							Watching
+						</Button>
+					{:else}
+						<Button
+							size="sm"
+							disabled={!projectId || program.importable_count === 0}
+							onclick={() => (watchOpen = true)}
+						>
+							<RadarIcon class="mr-1.5 size-3.5" />
+							Watch
+						</Button>
+					{/if}
+				</div>
+			</Sheet.Header>
+
+			<div class="border-b px-4">
+				<CountTabs
+					tabs={[
+						{ key: 'all', label: 'All scope' },
+						{ key: ScopeState.InScope, label: 'In scope' },
+						{ key: ScopeState.OutOfScope, label: 'Out of scope' }
+					]}
+					value={tab}
+					counts={counts as Record<string, number>}
+					onChange={(k) => (tab = k)}
+				/>
+			</div>
+
+			<div
+				class="flex flex-wrap gap-x-4 gap-y-1 border-b bg-muted/20 px-4 py-2 text-xs text-muted-foreground"
+			>
+				{#each program.sources as source (source)}
+					<span>
+						<span class="font-medium text-foreground">{SOURCE_LABELS[source] ?? source}</span>
+						· {SOURCE_NOTES[source] ?? ''}
+					</span>
+				{/each}
+			</div>
+
+			<ScrollArea.Root class="min-h-0 flex-1">
+				{#if loading}
+					<RowSkeleton rows={6} avatar={null} trailing="h-5 w-16 rounded-full" />
+				{:else if scopes.length === 0 && detail?.scopes_synced_at}
+					<EmptyState
+						title="No structured scope"
+						description="The scope is in the program policy."
+						class="p-10"
+					>
+						<Button
+							href={program.url ?? bountyVocabulary.url(program.platform)}
+							target="_blank"
+							rel="noreferrer noopener"
+							variant="outline"
+							size="sm"
+						>
+							<ExternalLinkIcon class="mr-2 size-3.5" />
+							Policy on {program.platform_label}
+						</Button>
+					</EmptyState>
+				{:else if loadError}
+					<EmptyState
+						icon={TriangleAlertIcon}
+						title="Program not loaded"
+						description={loadError}
+						class="p-10"
+					>
+						<Button
+							variant="outline"
+							size="sm"
+							onclick={() => void load(program.handle, program.platform)}
+						>
+							Retry
+						</Button>
+					</EmptyState>
+				{:else if scopes.length === 0 && (detail?.scope_access ?? program.scope_access) === ScopeAccess.Denied}
+					<EmptyState
+						title="Scope not shared"
+						description={`${program.platform_label} did not return this program's scope.`}
+						class="p-10"
+					/>
+				{:else if scopes.length === 0}
+					{#if syncing}
+						<div aria-busy="true">
+							<p class="flex items-center gap-2 border-b px-4 py-2.5 text-xs text-muted-foreground">
+								<RefreshCwIcon class="size-3.5 animate-spin" />
+								Fetching scope from {program.platform_label}
+							</p>
+							<RowSkeleton rows={4} avatar={null} trailing="h-5 w-16 rounded-full" />
+						</div>
+					{:else}
+						<EmptyState title="Scope not fetched" description={fetchFailed ?? ''} class="p-10">
+							<LoadingButton loading={syncing} variant="outline" size="sm" onclick={refreshScope}>
+								<RefreshCwIcon class="mr-2 size-3.5" />
+								Fetch scope
+							</LoadingButton>
+						</EmptyState>
+					{/if}
+				{:else}
+					{#if tab !== ScopeState.OutOfScope && unreachableTotal > 0}
+						<div class="border-b bg-muted/30 px-4 py-2.5 text-xs text-muted-foreground">
+							<span class="font-medium text-foreground">{unreachableTotal} assets</span> in this
+							program are not scannable:
+							{unreachableEntries.map(([label, n]) => `${n} ${label}`).join(' · ')}
+						</div>
+					{/if}
+					<div>
+						{#each visible as scope (scope.id)}
+							<ScopeRow
+								{scope}
+								selected={selected.has(scope.id)}
+								allowOutOfScope={showOutOfScope}
+								onToggle={toggle}
+							/>
+						{/each}
+					</div>
+				{/if}
+			</ScrollArea.Root>
+
+			{#if scopes.length > 0}
+				<Sheet.Footer class="gap-3 border-t p-4">
+					{#if selectedOutOfScope > 0}
+						<div
+							class="flex items-start gap-2 rounded-md border border-warning/25 bg-warning/10 p-2.5 text-xs"
+						>
+							<TriangleAlertIcon class="mt-0.5 size-3.5 shrink-0 text-warning" />
+							<span>
+								{selectedOutOfScope}
+								{selectedOutOfScope === 1 ? 'asset is' : 'assets are'} out of scope. Scanning them is
+								not authorised by the program.
+							</span>
+						</div>
+					{/if}
+
+					{#if outOfScopeImportable > 0}
+						<label class="flex items-center gap-2 text-xs text-muted-foreground">
+							<Switch checked={showOutOfScope} onCheckedChange={setAllowOutOfScope} />
+							Allow selecting {outOfScopeImportable} out-of-scope
+							{outOfScopeImportable === 1 ? 'asset' : 'assets'}
+						</label>
+					{/if}
+
+					<div class="flex w-full items-center justify-between gap-2">
+						<div class="flex items-center gap-3 text-xs text-muted-foreground">
+							<span class="tabular-nums">{selected.size} selected</span>
+							<Button variant="link" size="sm" class="h-auto p-0" onclick={selectAllVisible}>
+								Select all shown
+							</Button>
+						</div>
+						<Button
+							disabled={selected.size === 0 || !projectId}
+							onclick={() => (importOpen = true)}
+						>
+							Add {selected.size} as {selected.size === 1 ? 'target' : 'targets'}
+						</Button>
+					</div>
+				</Sheet.Footer>
+			{/if}
+		{/if}
+	</Sheet.Content>
+</Sheet.Root>
+
+{#if program && projectId}
+	<WatchDialog
+		{program}
+		{projectId}
+		open={watchOpen}
+		onOpenChange={(v) => (watchOpen = v)}
+		onSaved={(watch) => {
+			onImported();
+			onWatch?.(watch);
+		}}
+	/>
+{/if}
+
+{#if program}
+	<ImportDialog
+		{program}
+		count={selected.size}
+		outOfScopeCount={selectedOutOfScope}
+		open={importOpen}
+		{importing}
+		onOpenChange={(v) => (importOpen = v)}
+		onConfirm={runImport}
+	/>
+{/if}

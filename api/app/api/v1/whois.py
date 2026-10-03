@@ -1,0 +1,588 @@
+import uuid as _uuid
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi_pagination.ext.sqlalchemy import paginate
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import CurrentUser
+from app.api.pagination import Page
+from app.core.database import get_session
+from shared.enums.whois import WhoisLookupType
+from shared.models.target import Target
+from shared.models.whois import (
+    WhoisCorrelationResult,
+    WhoisRecord,
+    WhoisRecordRead,
+    WhoisRecordSummary,
+)
+from tools.whois.service import (
+    WhoisError,
+    WhoisLookupError,
+    WhoisNotApplicableError,
+    WhoisService,
+    WhoisValidationError,
+)
+
+router = APIRouter(
+    prefix="/tools/whois",
+    tags=["tools/whois"],
+)
+
+
+def get_whois_service() -> WhoisService:
+    return WhoisService()
+
+
+class WhoisLookupRequest(BaseModel):
+    query: str = Field(
+        ...,
+        min_length=1,
+        max_length=500,
+        description="Domain, IP, CIDR, ASN or URL",
+        examples=["example.com", "8.8.8.8", "192.168.0.0/16", "AS13335"],
+    )
+    store_in_db: bool = Field(
+        default=True,
+        description="Store the result for correlation",
+    )
+
+
+class WhoisLookupResponse(BaseModel):
+    record: WhoisRecordRead | None = Field(
+        default=None,
+        description="Stored record. Null when store_in_db is false.",
+    )
+    data: dict = Field(
+        description="Full parsed WHOIS/RDAP response",
+    )
+    cached: bool = Field(
+        description="Served from cache",
+    )
+
+
+class WhoisRefreshResponse(BaseModel):
+    record: WhoisRecordRead
+    previous_queried_at: str | None
+
+
+class WhoisStatsResponse(BaseModel):
+    total_records: int
+    by_lookup_type: dict[str, int]
+    unique_registrants: int
+    unique_registrars: int
+    unique_countries: int
+    unique_networks: int
+
+
+@router.post(
+    "/lookup",
+    response_model=WhoisLookupResponse,
+    status_code=status.HTTP_200_OK,
+    summary="WHOIS lookup",
+    description="WHOIS/RDAP lookup. Results are cached.",
+)
+async def whois_lookup(
+    request: WhoisLookupRequest,
+    _current_user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    service: Annotated[WhoisService, Depends(get_whois_service)],
+):
+    try:
+        service.ensure_ready()
+
+        result = await service.lookup(
+            query=request.query,
+            store_in_db=request.store_in_db,
+            session=session if request.store_in_db else None,
+        )
+        response = result.response
+
+        record_read = None
+        if request.store_in_db:
+            db_result = await session.execute(
+                select(WhoisRecord).where(WhoisRecord.query_value == response.query)
+            )
+            db_record = db_result.scalar_one_or_none()
+            if db_record:
+                record_read = WhoisRecordRead.model_validate(db_record)
+
+        return WhoisLookupResponse(
+            record=record_read,
+            data=response.model_dump(mode="json"),
+            cached=result.cache_hit,
+        )
+
+    except WhoisValidationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from e
+    except WhoisNotApplicableError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(e),
+        ) from e
+    except WhoisLookupError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"WHOIS lookup failed: {e}",
+        ) from e
+    except WhoisError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"WHOIS service error: {e}",
+        ) from e
+
+
+@router.get(
+    "/records",
+    response_model=Page[WhoisRecordSummary],
+    summary="List WHOIS records",
+    description="Cached WHOIS records.",
+)
+async def list_whois_records(
+    _current_user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    lookup_type: Annotated[
+        WhoisLookupType | None,
+        Query(description="Filter by lookup type"),
+    ] = None,
+    registrant_name: Annotated[
+        str | None,
+        Query(description="Exact registrant name"),
+    ] = None,
+    registrar_name: Annotated[
+        str | None,
+        Query(description="Exact registrar name"),
+    ] = None,
+    country: Annotated[
+        str | None,
+        Query(description="Two-letter country code"),
+    ] = None,
+):
+    query = select(WhoisRecord)
+
+    if lookup_type:
+        query = query.where(WhoisRecord.lookup_type == lookup_type.value)
+    if registrant_name:
+        query = query.where(WhoisRecord.registrant_name == registrant_name)
+    if registrar_name:
+        query = query.where(WhoisRecord.registrar_name == registrar_name)
+    if country:
+        query = query.where(WhoisRecord.country == country.upper())
+
+    query = query.order_by(WhoisRecord.queried_at.desc())
+
+    return await paginate(session, query)
+
+
+@router.get(
+    "/records/stats",
+    response_model=WhoisStatsResponse,
+    summary="WHOIS record stats",
+    description="Counts across cached WHOIS records.",
+)
+async def whois_records_stats(
+    _current_user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    total = await session.scalar(select(func.count(WhoisRecord.id)))
+
+    type_result = await session.execute(
+        select(WhoisRecord.lookup_type, func.count(WhoisRecord.id)).group_by(
+            WhoisRecord.lookup_type
+        )
+    )
+    by_type = {row[0]: row[1] for row in type_result.all()}
+
+    unique_registrants = await session.scalar(
+        select(func.count(func.distinct(WhoisRecord.registrant_name))).where(
+            WhoisRecord.registrant_name != ""
+        )
+    )
+    unique_registrars = await session.scalar(
+        select(func.count(func.distinct(WhoisRecord.registrar_name))).where(
+            WhoisRecord.registrar_name != ""
+        )
+    )
+    unique_countries = await session.scalar(
+        select(func.count(func.distinct(WhoisRecord.country))).where(
+            WhoisRecord.country != ""
+        )
+    )
+    unique_networks = await session.scalar(
+        select(func.count(func.distinct(WhoisRecord.network_cidr))).where(
+            WhoisRecord.network_cidr != ""
+        )
+    )
+
+    return WhoisStatsResponse(
+        total_records=total or 0,
+        by_lookup_type=by_type,
+        unique_registrants=unique_registrants or 0,
+        unique_registrars=unique_registrars or 0,
+        unique_countries=unique_countries or 0,
+        unique_networks=unique_networks or 0,
+    )
+
+
+@router.get(
+    "/records/{record_id}",
+    response_model=WhoisRecordRead,
+    summary="Get WHOIS record",
+    description="One cached WHOIS record with parsed data.",
+)
+async def get_whois_record(
+    record_id: str,
+    _current_user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    result = await session.execute(
+        select(WhoisRecord).where(WhoisRecord.id == record_id)
+    )
+    record = result.scalar_one_or_none()
+
+    if not record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="WHOIS record not found",
+        )
+
+    return WhoisRecordRead.model_validate(record)
+
+
+@router.post(
+    "/records/{record_id}/refresh",
+    response_model=WhoisRefreshResponse,
+    summary="Refresh WHOIS record",
+    description="Re-query RDAP for the record.",
+)
+async def refresh_whois_record(
+    record_id: str,
+    _current_user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    result = await session.execute(
+        select(WhoisRecord).where(WhoisRecord.id == record_id)
+    )
+    record = result.scalar_one_or_none()
+
+    if not record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="WHOIS record not found",
+        )
+
+    previous_queried_at = record.queried_at.isoformat() if record.queried_at else None
+
+    service = WhoisService(cache_ttl_days=0)
+    try:
+        service.ensure_ready()
+
+        await service.lookup(
+            query=record.query_value,
+            store_in_db=True,
+            session=session,
+        )
+
+        await session.refresh(record)
+
+        return WhoisRefreshResponse(
+            record=WhoisRecordRead.model_validate(record),
+            previous_queried_at=previous_queried_at,
+        )
+
+    except WhoisError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"WHOIS refresh failed: {e}",
+        ) from e
+
+
+@router.get(
+    "/records/by-target/{target_id}",
+    response_model=WhoisRecordRead | None,
+    summary="WHOIS record by target",
+    description="The cached WHOIS record linked to a target.",
+)
+async def get_whois_record_by_target(
+    target_id: str,
+    _current_user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    target_result = await session.execute(select(Target).where(Target.id == target_id))
+    target = target_result.scalar_one_or_none()
+
+    if not target or not target.whois_record_id:
+        return None
+
+    result = await session.execute(
+        select(WhoisRecord).where(WhoisRecord.id == target.whois_record_id)
+    )
+    record = result.scalar_one_or_none()
+
+    if not record:
+        return None
+
+    return WhoisRecordRead.model_validate(record)
+
+
+@router.delete(
+    "/records/{record_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete WHOIS record",
+    description="Remove a cached WHOIS record.",
+)
+async def delete_whois_record(
+    record_id: str,
+    _current_user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    result = await session.execute(
+        select(WhoisRecord).where(WhoisRecord.id == record_id)
+    )
+    record = result.scalar_one_or_none()
+
+    if not record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="WHOIS record not found",
+        )
+
+    await session.delete(record)
+    await session.commit()
+
+
+async def _target_correlations(
+    session: AsyncSession, service: WhoisService, target: Target
+) -> list[WhoisCorrelationResult]:
+    if not target.whois_record_id:
+        return []
+
+    correlations = await service.get_correlations_for_target(
+        session, target.whois_record_id
+    )
+
+    if not correlations:
+        return []
+
+    target_record_result = await session.execute(
+        select(WhoisRecord).where(WhoisRecord.id == target.whois_record_id)
+    )
+    target_record = target_record_result.scalar_one_or_none()
+
+    record_ids = {r.id for records in correlations.values() for r in records}
+    linked = await session.execute(
+        select(Target.whois_record_id, Target.id).where(
+            Target.project_id == target.project_id,
+            Target.whois_record_id.in_(record_ids),
+        )
+    )
+    target_by_record = dict(linked.all())
+
+    results = []
+    value_field_map = {
+        "registrant_name": "registrant_name",
+        "registrar_name": "registrar_name",
+        "network_cidr": "network_cidr",
+        "country": "country",
+        "nameserver": None,
+    }
+
+    for corr_type, records in correlations.items():
+        if corr_type == "nameserver" and target_record and target_record.nameservers:
+            corr_value = ", ".join(target_record.nameservers)
+        elif target_record and corr_type in value_field_map:
+            field = value_field_map.get(corr_type, corr_type)
+            corr_value = getattr(target_record, field, "") if field else ""
+        else:
+            corr_value = corr_type
+
+        summaries = [
+            _to_summary(r, target_id=target_by_record.get(r.id)) for r in records
+        ]
+
+        results.append(
+            WhoisCorrelationResult(
+                correlation_type=corr_type,
+                correlation_value=corr_value,
+                records=summaries,
+                count=len(summaries),
+            )
+        )
+
+    return results
+
+
+@router.get(
+    "/correlations/targets",
+    response_model=dict[str, list[WhoisCorrelationResult]],
+    summary="Correlations for several targets",
+)
+async def get_targets_correlations(
+    _current_user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    service: Annotated[WhoisService, Depends(get_whois_service)],
+    ids: Annotated[str, Query(description="Comma-separated target IDs")],
+):
+    wanted = []
+    for raw in ids.split(","):
+        try:
+            wanted.append(_uuid.UUID(raw.strip()))
+        except ValueError:
+            continue
+    if not wanted:
+        return {}
+    rows = await session.execute(select(Target).where(Target.id.in_(wanted[:100])))
+    out: dict[str, list[WhoisCorrelationResult]] = {}
+    for target in rows.scalars().all():
+        out[str(target.id)] = await _target_correlations(session, service, target)
+    return out
+
+
+@router.get(
+    "/correlations/target/{target_id}",
+    response_model=list[WhoisCorrelationResult],
+    summary="Target correlations",
+    description="Targets sharing WHOIS data, grouped by registrant, registrar, nameserver, network block and country.",
+)
+async def get_target_correlations(
+    target_id: str,
+    _current_user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    service: Annotated[WhoisService, Depends(get_whois_service)],
+):
+    try:
+        tid = _uuid.UUID(target_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid target ID",
+        ) from e
+
+    target_result = await session.execute(select(Target).where(Target.id == tid))
+    target = target_result.scalar_one_or_none()
+    if not target:
+        return []
+    return await _target_correlations(session, service, target)
+
+
+def _correlation_results(
+    correlation_type: str,
+    correlation_value: str,
+    records: list[WhoisRecord],
+) -> list[WhoisCorrelationResult]:
+    if not records:
+        return []
+    return [
+        WhoisCorrelationResult(
+            correlation_type=correlation_type,
+            correlation_value=correlation_value,
+            records=[_to_summary(r) for r in records],
+            count=len(records),
+        )
+    ]
+
+
+@router.get(
+    "/correlations/registrant",
+    response_model=list[WhoisCorrelationResult],
+    summary="Find by registrant",
+    description="WHOIS records with the same registrant name.",
+)
+async def correlate_by_registrant(
+    _current_user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    service: Annotated[WhoisService, Depends(get_whois_service)],
+    name: Annotated[str, Query(description="Registrant name")],
+):
+    records = await service.find_by_registrant(session, name)
+    return _correlation_results("registrant_name", name, records)
+
+
+@router.get(
+    "/correlations/registrar",
+    response_model=list[WhoisCorrelationResult],
+    summary="Find by registrar",
+    description="WHOIS records with the same registrar.",
+)
+async def correlate_by_registrar(
+    _current_user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    service: Annotated[WhoisService, Depends(get_whois_service)],
+    name: Annotated[str, Query(description="Registrar name")],
+):
+    records = await service.find_by_registrar(session, name)
+    return _correlation_results("registrar_name", name, records)
+
+
+@router.get(
+    "/correlations/network",
+    response_model=list[WhoisCorrelationResult],
+    summary="Find by network",
+    description="WHOIS records in one network block.",
+)
+async def correlate_by_network(
+    _current_user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    service: Annotated[WhoisService, Depends(get_whois_service)],
+    cidr: Annotated[str, Query(description="Network CIDR such as 8.8.8.0/24")],
+):
+    records = await service.find_by_network(session, cidr)
+    return _correlation_results("network_cidr", cidr, records)
+
+
+@router.get(
+    "/correlations/country",
+    response_model=list[WhoisCorrelationResult],
+    summary="Find by country",
+    description="WHOIS records registered in one country.",
+)
+async def correlate_by_country(
+    _current_user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    service: Annotated[WhoisService, Depends(get_whois_service)],
+    code: Annotated[str, Query(description="Two-letter country code")],
+):
+    records = await service.find_by_country(session, code)
+    return _correlation_results("country", code.upper(), records)
+
+
+@router.get(
+    "/correlations/nameserver",
+    response_model=list[WhoisCorrelationResult],
+    summary="Find by nameserver",
+    description="Domain records with the same nameserver.",
+)
+async def correlate_by_nameserver(
+    _current_user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    service: Annotated[WhoisService, Depends(get_whois_service)],
+    ns: Annotated[
+        str, Query(description="Nameserver host name such as ns1.google.com")
+    ],
+):
+    records = await service.find_by_nameserver(session, ns)
+    return _correlation_results("nameserver", ns, records)
+
+
+def _to_summary(
+    record: WhoisRecord, target_id: _uuid.UUID | None = None
+) -> WhoisRecordSummary:
+    return WhoisRecordSummary(
+        id=record.id,
+        target_id=target_id,
+        query_value=record.query_value,
+        lookup_type=record.lookup_type,
+        name=record.name,
+        registrant_name=record.registrant_name,
+        registrar_name=record.registrar_name,
+        country=record.country,
+        network_cidr=record.network_cidr,
+        registration_date=record.registration_date,
+        expiration_date=record.expiration_date,
+        queried_at=record.queried_at,
+    )

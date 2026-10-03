@@ -1,0 +1,497 @@
+"""nuclei CLI client — runs an explicit template set and keeps nuclei's own account of the run."""
+
+from __future__ import annotations
+
+import json
+import os
+import queue
+import re
+import tempfile
+import threading
+import time
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from shared.definitions.oast import EVICTION_SLACK
+from shared.logging import get_logger
+from shared.services.scan_resolve import redact_command
+from tools.nuclei.parser import Finding, parse_finding
+from tools.runner import CLIToolRunner, ToolNotFoundError
+from tools.runner.abort import StageAbortedError
+from tools.runner.executor import failure_excerpt
+from tools.runner.models import CommandRecorder
+
+logger = get_logger(__name__)
+
+NUCLEI_BINARY = "nuclei"
+DEFAULT_TIMEOUT = 7200
+
+# nuclei spells it -H/-header
+HEADER_FLAG = "-header"
+# short spellings of the flags the stage sets
+NUCLEI_ALIASES: dict[str, str] = {
+    "-H": "-header",
+    "-bs": "-bulk-size",
+    "-c": "-concurrency",
+    "-dc": "-disable-clustering",
+    "-duc": "-disable-update-check",
+    "-dr": "-disable-redirects",
+    "-eh": "-exclude-hosts",
+    "-fr": "-follow-redirects",
+    "-iserver": "-interactsh-server",
+    "-itoken": "-interactsh-token",
+    "-j": "-jsonl",
+    "-l": "-list",
+    "-mhe": "-max-host-error",
+    "-mp": "-metrics-port",
+    "-mt": "-max-time",
+    "-p": "-proxy",
+    "-prc": "-probe-concurrency",
+    "-sc": "-system-chrome",
+    "-nc": "-no-color",
+    "-nh": "-no-httpx",
+    "-ni": "-no-interactsh",
+    "-nmhe": "-no-mhe",
+    "-o": "-output",
+    "-or": "-omit-raw",
+    "-ot": "-omit-template",
+    "-pt": "-type",
+    "-rl": "-rate-limit",
+    "-rld": "-rate-limit-duration",
+    "-rlm": "-rate-limit-minute",
+    "-si": "-stats-interval",
+    "-sj": "-stats-json",
+    "-sresp": "-store-resp",
+    "-srd": "-store-resp-dir",
+    "-ss": "-scan-strategy",
+    "-t": "-templates",
+}
+
+_DROPPED = re.compile(
+    r"Skipped\s+(?P<host>\S+)\s+from target list as found unresponsive\s+"
+    r"(?:permanently:\s*(?P<reason>.*)|(?P<count>\d+)\s+times)\s*$"
+)
+_HONEYPOT = re.compile(
+    r"honeypot\s+detected[^:]*:\s*(?P<host>\S+).*?matched\s+(?P<count>\d+)",
+    re.IGNORECASE,
+)
+MAX_DROPPED = 500
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+IDLE_SECONDS = 2.0
+_IDLE = object()
+
+
+def _offer(inbox: queue.Queue, item: object, stop: threading.Event) -> None:
+    """Hand an item over, waiting for room."""
+    while not stop.is_set():
+        try:
+            inbox.put(item, timeout=IDLE_SECONDS)
+            return
+        except queue.Full:
+            continue
+
+
+class NucleiError(Exception):
+    """Raised when nuclei cannot be started."""
+
+
+def _drop_record(line: str) -> dict | None:
+    """A host whose findings this run does not carry."""
+    honeypot = _HONEYPOT.search(line)
+    if honeypot is not None:
+        count = honeypot.group("count")
+        return {
+            "host": honeypot.group("host").rstrip(":"),
+            "reason": f"flagged as a honeypot, matching {count} distinct checks. Findings suppressed.",
+        }
+    dropped = _DROPPED.search(line)
+    if dropped is None:
+        return None
+    reason = dropped.group("reason")
+    if reason is None:
+        reason = f"unresponsive {dropped.group('count')} times in a row"
+    return {"host": dropped.group("host"), "reason": reason.strip()[:200]}
+
+
+def _settle_run(run: NucleiRun, outcome, timeout: int, max_minutes: int) -> None:
+    """What the process itself said: killed, timed out, cut by -max-time, or failed."""
+    if outcome.stopped:
+        raise StageAbortedError
+    run.exit_code = outcome.return_code
+    run.timed_out = outcome.timed_out
+    allowance = max_minutes * 60
+    # nuclei exits 1 when -max-time cuts it
+    run.budget_hit = bool(
+        allowance and outcome.return_code == 1 and run.duration_seconds >= allowance - 5
+    )
+    if run.error is not None or run.budget_hit:
+        return
+    if outcome.timed_out:
+        run.error = f"nuclei timed out after {timeout} seconds"
+    elif outcome.return_code not in (0, None):
+        excerpt = failure_excerpt(outcome.stderr, None)
+        run.error = f"nuclei exited {outcome.return_code}" + (
+            f": {excerpt}" if excerpt else ""
+        )
+
+
+def _oast_args(opt: NucleiOptions) -> list[str]:
+    """The out-of-band flags, or the switch that turns the collaborator off."""
+    if not opt.interactsh:
+        return ["-no-interactsh"]
+    args: list[str] = []
+    if opt.interactsh_server:
+        args += ["-interactsh-server", opt.interactsh_server]
+    token = (opt.interactsh_token or "").strip()
+    if token:
+        args += ["-interactsh-token", token]
+    if opt.oast_wait_seconds > 0:
+        args += [
+            "-interactions-cooldown-period",
+            str(opt.oast_wait_seconds),
+            "-interactions-eviction",
+            str(opt.oast_wait_seconds + EVICTION_SLACK),
+        ]
+    return args
+
+
+def _paced(
+    records: Iterator[dict], on_idle: Callable[[], None] | None
+) -> Iterator[object]:
+    """Yield each record, and an idle marker whenever nuclei has gone quiet."""
+    if on_idle is None:
+        yield from records
+        return
+    inbox: queue.Queue = queue.Queue(maxsize=1000)
+    done = object()
+    stop = threading.Event()
+
+    def _read() -> None:
+        try:
+            for record in records:
+                while not stop.is_set():
+                    try:
+                        inbox.put(record, timeout=IDLE_SECONDS)
+                        break
+                    except queue.Full:
+                        continue
+                if stop.is_set():
+                    return
+        except Exception as exc:
+            _offer(inbox, exc, stop)
+            return
+        _offer(inbox, done, stop)
+
+    reader = threading.Thread(target=_read, daemon=True)
+    reader.start()
+    try:
+        while True:
+            try:
+                item = inbox.get(timeout=IDLE_SECONDS)
+            except queue.Empty:
+                if not reader.is_alive() and inbox.empty():
+                    return
+                on_idle()
+                yield _IDLE
+                continue
+            if item is done:
+                return
+            if isinstance(item, Exception):
+                raise item
+            yield item
+    finally:
+        stop.set()
+
+
+def _guarded(callback: Callable[[], None] | None) -> Callable[[], None] | None:
+    """on_idle writes exactly what on_finding writes."""
+    if callback is None:
+        return None
+
+    def _call() -> None:
+        try:
+            callback()
+        except Exception as exc:
+            raise _CallbackError(exc) from exc
+
+    return _call
+
+
+class _CallbackError(Exception):
+    """Carries an exception the caller's on_finding raised, past this module's own handler."""
+
+    def __init__(self, cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
+@dataclass
+class NucleiOptions:
+    templates_file: str | None = None
+    template_paths: tuple[str, ...] = ()
+    rate: int = 150
+    concurrency: int = 25
+    bulk_size: int = 25
+    timeout: int = 10
+    retries: int = 1
+    max_host_error: int = 30
+    max_minutes: int = 0
+    headless: bool = False
+    interactsh: bool = False
+    interactsh_server: str | None = None
+    interactsh_token: str | None = None
+    oast_wait_seconds: int = 0
+    honeypot_threshold: int = 0
+    proxy_url: str | None = None
+    headers: dict[str, str] = field(default_factory=dict)
+    exclude_hosts: tuple[str, ...] = ()
+    follow_redirects: bool | None = None
+    store_resp_dir: str | None = None
+    scan_strategy: str | None = "host-spray"
+    protocol_types: tuple[str, ...] = ()
+    dast: bool = False
+    fuzz_param_frequency: int | None = None
+    extra_args: list[str] = field(default_factory=list)
+
+
+@dataclass
+class NucleiStats:
+    """nuclei's own numbers."""
+
+    templates: int | None = None
+    hosts: int | None = None
+    requests: int | None = None
+    total: int | None = None
+    matched: int | None = None
+    errors: int | None = None
+    duration: str | None = None
+    rps: int | None = None
+
+
+@dataclass
+class NucleiRun:
+    findings: list[Finding] = field(default_factory=list)
+    stats: NucleiStats = field(default_factory=NucleiStats)
+    dropped: list[dict] = field(default_factory=list)
+    exit_code: int = 0
+    timed_out: bool = False
+    budget_hit: bool = False
+    error: str | None = None
+    command: str = ""
+    duration_seconds: float = 0.0
+
+
+def _int(value) -> int | None:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+class NucleiClient:
+    def __init__(
+        self,
+        *,
+        options: NucleiOptions | None = None,
+        recorder: CommandRecorder | None = None,
+    ) -> None:
+        self.options = options or NucleiOptions()
+        self.recorder = recorder
+        try:
+            self._runner = CLIToolRunner(
+                NUCLEI_BINARY,
+                default_timeout=DEFAULT_TIMEOUT,
+                recorder=recorder,
+                extra_args=list(self.options.extra_args),
+                aliases=NUCLEI_ALIASES,
+            )
+        except ToolNotFoundError as exc:
+            raise NucleiError(str(exc)) from exc
+
+    def args(self) -> list[str]:
+        opt = self.options
+        args: list[str] = []
+        if opt.templates_file:
+            args += ["-t", opt.templates_file]
+        for path in opt.template_paths:
+            args += ["-t", path]
+        args += [
+            "-jsonl",
+            "-omit-template",
+            "-no-color",
+            "-disable-update-check",
+            "-stats",
+            "-stats-json",
+            "-stats-interval",
+            "20",
+            "-rate-limit",
+            str(opt.rate),
+            "-concurrency",
+            str(opt.concurrency),
+            "-bulk-size",
+            str(opt.bulk_size),
+            "-timeout",
+            str(opt.timeout),
+            "-retries",
+            str(opt.retries),
+            "-max-host-error",
+            str(opt.max_host_error),
+        ]
+        if opt.max_minutes > 0:
+            args += ["-max-time", f"{opt.max_minutes}m"]
+        if opt.scan_strategy:
+            args += ["-scan-strategy", opt.scan_strategy]
+        if opt.protocol_types:
+            args += ["-type", ",".join(opt.protocol_types)]
+        if opt.dast:
+            args.append("-dast")
+            if opt.fuzz_param_frequency:
+                args += ["-fuzz-param-frequency", str(opt.fuzz_param_frequency)]
+        if opt.headless:
+            args += ["-headless", "-system-chrome"]
+        args += _oast_args(opt)
+        if opt.honeypot_threshold > 0:
+            args += [
+                "-honeypot-detect",
+                "-honeypot-threshold",
+                str(opt.honeypot_threshold),
+                "-suppress-honeypot",
+            ]
+        if opt.proxy_url:
+            args += ["-proxy", opt.proxy_url]
+        for name, value in (opt.headers or {}).items():
+            args += [HEADER_FLAG, f"{name}: {value}"]
+        if opt.exclude_hosts:
+            args += ["-exclude-hosts", ",".join(opt.exclude_hosts)]
+        if opt.follow_redirects is True:
+            args.append("-follow-redirects")
+        elif opt.follow_redirects is False:
+            args.append("-disable-redirects")
+        # writes every exchange, matched or not: one template against one target only
+        if opt.store_resp_dir:
+            args += ["-store-resp", "-store-resp-dir", opt.store_resp_dir]
+        return args
+
+    def scan(
+        self,
+        targets: list[str],
+        *,
+        on_finding: Callable[[Finding], None] | None = None,
+        on_progress: Callable[[NucleiStats], None] | None = None,
+        on_idle: Callable[[], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
+        timeout: int | None = None,
+    ) -> NucleiRun:
+        """Run one group and return everything nuclei said about it."""
+        run = NucleiRun()
+        if not targets:
+            return run
+
+        stats = NucleiStats()
+        dropped: list[dict] = []
+        seen_drops: set[str] = set()
+
+        def _stderr(line: str) -> None:
+            clean = _ANSI.sub("", line).strip()
+            if not clean:
+                return
+            if clean.startswith("{") and '"templates"' in clean:
+                self._absorb(stats, clean)
+                if on_progress is not None:
+                    on_progress(stats)
+                return
+            if len(dropped) >= MAX_DROPPED:
+                return
+            record = _drop_record(clean)
+            if record is None or record["host"] in seen_drops:
+                return
+            seen_drops.add(record["host"])
+            dropped.append(record)
+
+        started = time.monotonic()
+        outcome = None
+        try:
+            with self._stream(targets, _stderr, timeout, should_stop) as stream:
+                outcome = stream
+                for record in _paced(stream.records, _guarded(on_idle)):
+                    if record is _IDLE:
+                        continue
+                    finding = parse_finding(record)
+                    if finding is None:
+                        continue
+                    run.findings.append(finding)
+                    if on_finding is None:
+                        continue
+                    try:
+                        on_finding(finding)
+                    except Exception as exc:
+                        raise _CallbackError(exc) from exc
+        except _CallbackError as wrapper:
+            run.duration_seconds = round(time.monotonic() - started, 2)
+            run.stats = stats
+            run.dropped = dropped
+            raise wrapper.cause from None
+        except Exception as exc:
+            run.error = str(exc)[:500]
+            logger.warning("nuclei run failed", error=run.error)
+        run.duration_seconds = round(time.monotonic() - started, 2)
+        run.stats = stats
+        run.dropped = dropped
+        run.command = self._command(targets)
+        if outcome is not None:
+            _settle_run(
+                run, outcome, timeout or DEFAULT_TIMEOUT, self.options.max_minutes
+            )
+        return run
+
+    def _stream(self, targets: list[str], sink, timeout: int | None, should_stop=None):
+        return self._runner.stream_json(
+            args=self.args(),
+            input_data=targets,
+            input_flag="-list",
+            json_flag="-jsonl",
+            silent=False,
+            timeout=timeout,
+            stderr_sink=sink,
+            should_stop=should_stop,
+        )
+
+    def _command(self, targets: list[str]) -> str:
+        return redact_command(
+            " ".join(
+                [NUCLEI_BINARY, "-list", f"<{len(targets)} targets>", *self.args()]
+            )
+        )
+
+    @staticmethod
+    def _absorb(stats: NucleiStats, line: str) -> None:
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(payload, dict):
+            return
+        for key, attr in (
+            ("templates", "templates"),
+            ("hosts", "hosts"),
+            ("requests", "requests"),
+            ("total", "total"),
+            ("matched", "matched"),
+            ("errors", "errors"),
+            ("rps", "rps"),
+        ):
+            value = _int(payload.get(key))
+            if value is not None:
+                setattr(stats, attr, value)
+        duration = payload.get("duration")
+        if isinstance(duration, str) and duration:
+            stats.duration = duration
+
+
+def write_template_list(paths: list[str]) -> Path:
+    """Persist the resolved template set for nuclei -t."""
+    descriptor, name = tempfile.mkstemp(prefix="nuclei_templates_", suffix=".txt")
+    with os.fdopen(descriptor, "w") as handle:
+        handle.write("\n".join(paths) + "\n")
+    return Path(name)

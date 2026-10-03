@@ -1,0 +1,132 @@
+<script lang="ts">
+	import TableSkeleton from '$lib/components/skeleton/table-skeleton.svelte';
+	import { ScrollArea } from '$lib/components/ui/scroll-area';
+	import ListHeader from '../table/list-header.svelte';
+	import ResultsPagination from '../table/results-pagination.svelte';
+	import HostRow from './host-row.svelte';
+	import { HOST_LEAD_COLUMNS } from './columns';
+	import type { TableColumn } from '../table/columns';
+	import type { FolderChip, HostPage, TreeNode } from '$lib/utilities/endpoints';
+	import type { Connector, ConnectorSpec } from '$lib/types/connector';
+
+	interface Props {
+		page: HostPage | null;
+		loading?: boolean;
+		searching?: boolean;
+		terms?: string[];
+		columns: TableColumn[];
+		pad?: string;
+		cursor?: number;
+		sortKey: string;
+		sortDir: 1 | -1;
+		connectors?: Connector[];
+		catalog?: ConnectorSpec[];
+		onSort: (key: string) => void;
+		onPage: (page: number) => void;
+		onEnter: (host: string) => void;
+		onEnterFolder: (host: string, chip: FolderChip) => void;
+		onCopy: (node: TreeNode) => void;
+		onWordlist: (node: TreeNode) => void;
+		onList: (node: TreeNode) => void;
+		onVerify?: (node: TreeNode) => void;
+		onSend?: (node: TreeNode, connectorId: string) => void;
+		onFilter?: (token: string) => void;
+		onShowRootOnly?: () => void;
+	}
+
+	let {
+		page,
+		loading = false,
+		searching = false,
+		terms = [],
+		columns,
+		pad = 'py-3',
+		cursor = -1,
+		sortKey,
+		sortDir,
+		connectors = [],
+		catalog = [],
+		onSort,
+		onPage,
+		onEnter,
+		onEnterFolder,
+		onCopy,
+		onWordlist,
+		onList,
+		onVerify,
+		onSend,
+		onFilter,
+		onShowRootOnly
+	}: Props = $props();
+
+	let lead = $derived(
+		searching
+			? HOST_LEAD_COLUMNS.map((c) => (c.key === 'endpoints' ? { ...c, label: 'Matches' } : c))
+			: HOST_LEAD_COLUMNS
+	);
+	let pending = $derived(loading && !page);
+</script>
+
+<ScrollArea orientation="horizontal">
+	<ListHeader {lead} {columns} {sortKey} {sortDir} {onSort} />
+	<div class="transition-opacity {loading && !pending ? 'opacity-60' : ''}">
+		{#if pending}
+			<TableSkeleton {lead} {columns} header={false} />
+		{:else if page}
+			{#each page.items as node, i (node.key)}
+				<div data-host-row-index={i}>
+					<HostRow
+						{node}
+						{columns}
+						{terms}
+						{pad}
+						{searching}
+						{connectors}
+						{catalog}
+						focused={cursor === i}
+						{onEnter}
+						{onEnterFolder}
+						{onCopy}
+						{onWordlist}
+						{onList}
+						{onVerify}
+						{onSend}
+						{onFilter}
+					/>
+				</div>
+			{/each}
+		{/if}
+	</div>
+</ScrollArea>
+
+{#if page && (page.root_only > 0 || page.total > page.size)}
+	<div
+		class="flex flex-wrap items-center gap-x-3 gap-y-1 border-t px-4 py-2 text-xs text-muted-foreground"
+	>
+		{#if page.root_only > 0 && onShowRootOnly}
+			<span>
+				{page.root_only.toLocaleString()}
+				{page.root_only === 1 ? 'host has' : 'hosts have'} only a root page.
+			</span>
+			<button
+				type="button"
+				class="rounded-sm text-primary hover:text-primary/80 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+				onclick={onShowRootOnly}
+			>
+				Show
+			</button>
+		{/if}
+		{#if page.total > page.size}
+			<div class="ml-auto -my-2 -mr-4">
+				<ResultsPagination
+					total={page.total}
+					page={page.page - 1}
+					pageSize={page.size}
+					noun="host"
+					plural="hosts"
+					onPage={(p) => onPage(p + 1)}
+				/>
+			</div>
+		{/if}
+	</div>
+{/if}

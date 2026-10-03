@@ -1,0 +1,106 @@
+import uuid
+from datetime import datetime
+from functools import partial
+
+from pydantic import BaseModel, field_validator
+from sqlalchemy import Column
+from sqlalchemy.types import JSON
+from sqlmodel import Field, SQLModel
+
+from shared.definitions.notification_events import (
+    CHANNEL_LEVELS,
+    DEFAULT_CHANNEL_EVENTS,
+    DEFAULT_CHANNEL_LEVEL,
+)
+from shared.enums.notification import NotificationType
+from shared.enums.notification_channel import NotificationProvider
+from shared.utils.datetime import utc_now
+from shared.utils.validation import clean_name, clean_optional_name
+
+PROVIDERS = tuple(p.value for p in NotificationProvider)
+
+DEFAULT_PREFERENCE_TYPES = list(DEFAULT_CHANNEL_EVENTS)
+
+_KNOWN_TYPES = frozenset(t.value for t in NotificationType)
+_KNOWN_LEVELS = frozenset(level.value for level in CHANNEL_LEVELS)
+
+
+class NotificationPreference(BaseModel):
+    types: list[str] = Field(default_factory=lambda: list(DEFAULT_PREFERENCE_TYPES))
+    min_severity: str = DEFAULT_CHANNEL_LEVEL
+
+    @field_validator("types")
+    @classmethod
+    def _known_types(cls, v: list[str]) -> list[str]:
+        return [t for t in v if t in _KNOWN_TYPES]
+
+    @field_validator("min_severity")
+    @classmethod
+    def _known_level(cls, v: str) -> str:
+        return v if v in _KNOWN_LEVELS else DEFAULT_CHANNEL_LEVEL
+
+
+class NotificationChannel(SQLModel, table=True):
+    __tablename__ = "notification_channels"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    name: str = Field(max_length=120)
+    provider: str = Field(max_length=20)
+    is_active: bool = Field(default=True)
+    config_encrypted: str = Field(default="")
+    events: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    created_by: uuid.UUID = Field(foreign_key="users.id")
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    last_test_at: datetime | None = Field(default=None)
+    last_test_ok: bool | None = Field(default=None)
+    last_test_message: str | None = Field(default=None)
+    last_sent_at: datetime | None = Field(default=None)
+    last_sent_ok: bool | None = Field(default=None)
+    last_sent_message: str | None = Field(default=None, max_length=500)
+
+
+class NotificationChannelCreate(BaseModel):
+    name: str
+    provider: str
+    is_active: bool = True
+    config: dict
+    events: NotificationPreference = NotificationPreference()
+
+    _validate_name = field_validator("name")(clean_name)
+
+
+class NotificationChannelUpdate(BaseModel):
+    name: str | None = None
+    is_active: bool | None = None
+    config: dict | None = None
+    events: NotificationPreference | None = None
+
+    _validate_name = field_validator("name")(partial(clean_optional_name, max_len=120))
+
+
+class NotificationChannelRead(BaseModel):
+    id: uuid.UUID
+    name: str
+    provider: str
+    is_active: bool
+    config_masked: dict
+    events: NotificationPreference
+    created_at: datetime
+    updated_at: datetime
+    last_test_at: datetime | None
+    last_test_ok: bool | None
+    last_test_message: str | None
+    last_sent_at: datetime | None = None
+    last_sent_ok: bool | None = None
+    last_sent_message: str | None = None
+
+
+class NotificationChannelTestConfig(BaseModel):
+    provider: str
+    config: dict
+
+
+class NotificationChannelTestResult(BaseModel):
+    success: bool
+    message: str

@@ -1,0 +1,22 @@
+[project]
+name = "rengine-shared"
+version = "3.0.0"
+description = "reNgine shared code"
+requires-python = ">=3.13"
+dependencies = [
+    "validators>=0.35.0",
+    "cryptography>=42",
+    "apprise>=1.9.0",
+    "croniter>=2.0.0",
+]
+
+
+[build-system]
+requires = ["setuptools>=81.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.setuptools.package-data]
+"shared.definitions" = ["data/*.json"]

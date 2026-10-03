@@ -1,64 +1,50 @@
-web/custom_engines*
-Pipfile*
-resume.cfg
-*.txt
-*.log
-*.pot
-*.pyc
-__pycache__/
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-media
-
-### Django.Python Stack ###
-# Byte-compiled / optimized / DLL files
-*.py[cod]
-*$py.class
-
-# C extensions
-*.so
-
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-
-# Sphinx documentation
-docs/_build/
-
-# pyenv
-.python-version
-
-**/.DS_Store
-staticfiles/
-
-secret
-/secrets
-
-get-docker.sh
-
 # Environment variables
 .env
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Trashes
+
+# Docker
+docker-compose.override.yml
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+*.egg
+**/build/
+**/*.egg-info/
+
+# Claude Code / agent tooling — working notes never ship
+CLAUDE.md
+CLAUDE.local.md
+NOTES.md
+AGENTS.md
+GEMINI.md
+.cursorrules
+.cursor/
+.windsurfrules
+.github/copilot-instructions.md
+.claude/
+.agents/
+.aider*
+skills-lock.json
+
+# scan artifacts (screenshots, etc.)
+scan_media/
+research/
+
+# backup archives carry SECRET_KEY, and therefore every stored credential
+backups/
+*.tar

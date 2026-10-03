@@ -1,0 +1,26 @@
+{% import 'macros.html' as m with context %}
+<table class="table block">
+  <thead><tr><th style="width:22mm">Severity</th><th>Meaning</th></tr></thead>
+  <tbody>
+    {% for row in severities %}
+    <tr><td>{{ m.sev(row.key, row.label) }}</td><td class="wrap">{{ row.help }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if show_scoring %}
+<div class="sub">
+  <div class="label block">Ranking method</div>
+  <p class="small">Findings are ordered by severity, weighted for confirmed exploitation, exploitation probability, the number of affected assets and novelty since the previous run.</p>
+  <p class="small">The posture score starts at 100 and deducts per observed condition up to a fixed ceiling.</p>
+</div>
+{% endif %}
+
+{% if glossary %}
+<div class="sub">
+  <div class="label block">Terms</div>
+  <table class="table">
+    <tbody>{% for term, meaning in glossary %}<tr><td style="width:26mm"><strong>{{ term }}</strong></td><td class="wrap">{{ meaning }}</td></tr>{% endfor %}</tbody>
+  </table>
+</div>
+{% endif %}

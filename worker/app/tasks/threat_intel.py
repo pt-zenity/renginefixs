@@ -1,0 +1,179 @@
+"""Nightly exploitation-intelligence refresh, and on-demand provider enrichment."""
+
+from celery import shared_task
+from sqlalchemy import text
+
+from app.config import settings
+from app.database import get_sync_session
+from shared.definitions.notifications import (
+    IntelShift,
+    SoftwareExposure,
+    intel_changed,
+    software_exposed,
+)
+from shared.logging import get_logger
+from shared.services.exploitation import evaluate_all, evaluate_scan
+from shared.services.notification_sync import SyncNotificationPublisher
+from shared.services.software_match import RematchResult, rematch_latest
+from shared.services.threat_intel import (
+    apply_intel,
+    auto_sync_enabled,
+    feeds_ready,
+    sync_feeds,
+)
+from shared.services.vulnx import enrich_scan
+from shared.utils.datetime import utc_now
+
+logger = get_logger(__name__)
+
+
+ALERT_KINDS = ("kev", "ransom_path", "fresh_exploit", "weaponised")
+
+_NEW_SIGNALS_SQL = """
+SELECT s.kind, v.template_name, v.scan_id, v.project_id,
+       coalesce((v.cve_ids::jsonb ->> 0), '') AS cve, t.target_value
+FROM intel_signals s
+JOIN vulnerabilities v ON v.id = s.vulnerability_id
+JOIN targets t ON t.id = v.target_id
+WHERE s.kind = ANY(:kinds) AND s.created_at >= :since
+ORDER BY array_position(:kinds, s.kind), v.exploit_score DESC
+"""
+
+
+def _notify_changes(session, since) -> int:
+    """Delta-only, one notification per project whose findings gained a signal."""
+    rows = session.execute(
+        text(_NEW_SIGNALS_SQL),
+        {"kinds": list(ALERT_KINDS), "since": since},
+    ).all()
+    by_project: dict = {}
+    for r in rows:
+        by_project.setdefault(r.project_id, []).append(r)
+    sent = 0
+    for project_id, group in by_project.items():
+        payload = intel_changed(
+            [
+                IntelShift(
+                    cve=r.cve or "",
+                    target=r.target_value or "",
+                    finding=r.template_name,
+                    kind=r.kind,
+                    scan_id=str(r.scan_id),
+                )
+                for r in group
+            ]
+        )
+        if payload is None:
+            continue
+        try:
+            SyncNotificationPublisher(settings.redis_url).publish(
+                session=session,
+                type=payload["type"],
+                severity=payload["severity"],
+                title=payload["title"],
+                message=payload["message"],
+                metadata=payload.get("metadata"),
+                project_id=project_id,
+            )
+        except Exception:
+            logger.warning("threat intel notification failed", exc_info=True)
+            continue
+        sent += len(group)
+    return sent
+
+
+def _notify_exposures(session, result: RematchResult) -> int:
+    """One notification per project for the matches the corpus refresh wrote first."""
+    by_project: dict = {}
+    for e in result.exposed:
+        by_project.setdefault(e.project_id, []).append(e)
+    sent = 0
+    for project_id, rows in by_project.items():
+        payload = software_exposed(
+            [
+                SoftwareExposure(
+                    cve=e.cve,
+                    host=e.host,
+                    name=e.name,
+                    version=e.version,
+                    severity=e.severity,
+                    is_kev=e.is_kev,
+                    kev_ransomware=e.kev_ransomware,
+                )
+                for e in rows
+            ]
+        )
+        if payload is None:
+            continue
+        try:
+            SyncNotificationPublisher(settings.redis_url).publish(
+                session=session,
+                type=payload["type"],
+                severity=payload["severity"],
+                title=payload["title"],
+                message=payload["message"],
+                metadata=payload.get("metadata"),
+                project_id=project_id,
+            )
+        except Exception:
+            logger.warning("software exposure notification failed", exc_info=True)
+            continue
+        sent += len(rows)
+    return sent
+
+
+@shared_task(name="app.tasks.threat_intel.refresh")
+def refresh(feeds: list[str] | None = None, force: bool = False) -> dict:
+    """Download the feeds, re-score every finding, then re-rank."""
+    started = utc_now()
+    with get_sync_session() as session:
+        if not force and not auto_sync_enabled(session):
+            logger.info("automatic feed download is off, skipping")
+            return {"skipped": "auto_sync_off"}
+        counts = sync_feeds(session, feeds)
+        applied = apply_intel(session)
+        ranked = evaluate_all(session)
+        inferred = rematch_latest(session)
+        alerted = _notify_changes(session, started)
+        exposed = _notify_exposures(session, inferred)
+    logger.info(
+        "threat intel refreshed",
+        **counts,
+        **applied,
+        alerted=alerted,
+        newly_exposed=inferred.exposed_total,
+    )
+    return {
+        "feeds": counts,
+        "applied": applied,
+        "ranked": ranked,
+        "inferred": {
+            "scans": inferred.scans,
+            "findings": inferred.findings,
+            "newly_exposed": inferred.exposed_total,
+        },
+        "alerted": alerted,
+        "exposed": exposed,
+    }
+
+
+@shared_task(name="app.tasks.threat_intel.apply_scan")
+def apply_scan(scan_id: str) -> dict:
+    """Score and rank one scan's findings against the stored feeds."""
+    with get_sync_session() as session:
+        if not feeds_ready(session):
+            logger.info("threat feeds empty, skipping scan intel", scan_id=scan_id)
+            return {"skipped": True}
+        applied = apply_intel(session, scan_id=scan_id)
+        ranked = evaluate_scan(session, scan_id)
+    return {"applied": applied, "ranked": ranked}
+
+
+@shared_task(name="app.tasks.threat_intel.enrich")
+def enrich(scan_id: str, limit: int = 200) -> dict:
+    """Fill the provider cache for one scan's CVEs, then re-rank on the richer data."""
+    with get_sync_session() as session:
+        result = enrich_scan(session, scan_id, limit=limit)
+        ranked = evaluate_scan(session, scan_id) if result["cached"] else {}
+    logger.info("vulnx enrichment finished", scan_id=scan_id, **result)
+    return {"enrich": result, "ranked": ranked}

@@ -1,0 +1,42 @@
+from __future__ import annotations
+
+from reports.base import RenderContext, Section
+from reports.config import SectionConfig, flag
+from reports.data.source import REPORT_DIMENSIONS
+from shared.definitions.reports import SectionGroup, SectionRole
+from shared.definitions.surface import SURFACE_LABELS
+
+
+class CoverageConfig(SectionConfig):
+    show_scanner_runs: bool = flag(True, title="Show scanner runs")
+    show_not_scanned: bool = flag(True, title="List dimensions not scanned")
+    show_suppressed: bool = flag(True, title="Note suppressed findings")
+
+
+class CoverageSection(Section):
+    name = "coverage"
+    title = "Coverage and limitations"
+    description = "Dimensions scanned, scanner runs and limitations."
+    group = SectionGroup.APPENDIX.value
+    order = 20
+    role = SectionRole.FURNITURE.value
+    config_model = CoverageConfig
+
+    def build(self, ctx: RenderContext, cfg: CoverageConfig) -> dict:
+        dimensions = [
+            {
+                "label": SURFACE_LABELS[dim],
+                "covered": ctx.data.coverage[dim].covered,
+                "count": ctx.data.coverage[dim].count,
+            }
+            for dim in REPORT_DIMENSIONS
+        ]
+        rows = ctx.data.coverage_rows if cfg.show_scanner_runs else []
+        caveats = [
+            c
+            for c in ctx.brief.caveats
+            if cfg.show_not_scanned or c.kind != "not_scanned"
+        ]
+        if not cfg.show_suppressed:
+            caveats = [c for c in caveats if c.kind != "suppressed"]
+        return {"dimensions": dimensions, "runs": rows, "caveats": caveats}

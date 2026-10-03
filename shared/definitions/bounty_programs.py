@@ -1,0 +1,519 @@
+"""Bug bounty program vocabulary: platforms, scope asset types and scannable targets."""
+
+from __future__ import annotations
+
+import contextlib
+import ipaddress
+import re
+from dataclasses import dataclass
+from enum import Enum
+
+import validators
+
+from shared.enums.api_key import APIProvider
+from shared.enums.target import TargetType
+from shared.utils.text import strip_control
+from shared.utils.validation import normalize_target_value, validate_target
+
+
+class BountyPlatform(Enum):
+    HACKERONE = "hackerone"
+    BUGCROWD = "bugcrowd"
+    INTIGRITI = "intigriti"
+    YESWEHACK = "yeswehack"
+
+
+class ProgramSource(Enum):
+    """Where the row came from."""
+
+    API = "api"
+    FEED = "feed"
+
+
+class ProgramState(Enum):
+    PUBLIC = "public"
+    PRIVATE = "private"
+
+
+class SubmissionState(Enum):
+    OPEN = "open"
+    PAUSED = "paused"
+    CLOSED = "closed"
+    UNKNOWN = "unknown"
+
+
+class ScopeState(Enum):
+    IN_SCOPE = "in_scope"
+    OUT_OF_SCOPE = "out_of_scope"
+
+
+class ScopeAccess(Enum):
+    """Why a program's scope is absent."""
+
+    DENIED = "denied"
+
+
+class BountyEvent(Enum):
+    PROGRAM_ADDED = "program_added"
+    PROGRAM_WENT_PUBLIC = "program_went_public"
+    SUBMISSIONS_OPENED = "submissions_opened"
+    SUBMISSIONS_CLOSED = "submissions_closed"
+    BOUNTIES_STARTED = "bounties_started"
+    SCOPE_ADDED = "scope_added"
+    SCOPE_REMOVED = "scope_removed"
+    WENT_OUT_OF_SCOPE = "went_out_of_scope"
+    CAME_INTO_SCOPE = "came_into_scope"
+    PAYOUT_CHANGED = "payout_changed"
+    RULES_CHANGED = "rules_changed"
+    ASSET_BOUNTY_CHANGED = "asset_bounty_changed"
+    ASSET_RULES_CHANGED = "asset_rules_changed"
+
+
+class AssetGroup(Enum):
+    NETWORK = "network"
+    MOBILE = "mobile"
+    CODE = "code"
+    OTHER = "other"
+
+
+@dataclass(frozen=True)
+class PlatformSpec:
+    key: str
+    label: str
+    url: str
+    supports_private: bool
+    note: str
+    tag: str
+    tag_color: str
+    source: str
+    api_provider: str | None = None
+    credential: str = ""
+    follow_label: str = ""
+    tracks_reports: bool = False
+    report_url: str = ""
+
+
+PLATFORMS: tuple[PlatformSpec, ...] = (
+    PlatformSpec(
+        key=BountyPlatform.HACKERONE.value,
+        label="HackerOne",
+        url="https://hackerone.com",
+        supports_private=True,
+        note="Public and private programs visible to the API token",
+        tag="hackerone",
+        tag_color="#0EA5E9",
+        source=ProgramSource.API.value,
+        api_provider=APIProvider.HACKERONE.value,
+        credential="API username and token",
+        follow_label="Bookmarked on HackerOne",
+        tracks_reports=True,
+        report_url="https://hackerone.com/reports/{id}",
+    ),
+    PlatformSpec(
+        key=BountyPlatform.BUGCROWD.value,
+        label="Bugcrowd",
+        url="https://bugcrowd.com",
+        supports_private=False,
+        note="Public engagements from the Bounty Targets feed",
+        tag="bugcrowd",
+        tag_color="#F97316",
+        source=ProgramSource.FEED.value,
+    ),
+    PlatformSpec(
+        key=BountyPlatform.INTIGRITI.value,
+        label="Intigriti",
+        url="https://app.intigriti.com",
+        supports_private=True,
+        note="Public and invite-only programs visible to the access token",
+        tag="intigriti",
+        tag_color="#8B5CF6",
+        source=ProgramSource.API.value,
+        api_provider=APIProvider.INTIGRITI.value,
+        credential="personal access token",
+        follow_label="Followed on Intigriti",
+    ),
+    PlatformSpec(
+        key=BountyPlatform.YESWEHACK.value,
+        label="YesWeHack",
+        url="https://yeswehack.com",
+        supports_private=False,
+        note="Public programs from the Bounty Targets feed",
+        tag="yeswehack",
+        tag_color="#10B981",
+        source=ProgramSource.FEED.value,
+    ),
+)
+
+SOURCE_LABELS: dict[str, str] = {
+    ProgramSource.API.value: "Platform API",
+    ProgramSource.FEED.value: "Bounty Targets feed",
+}
+
+PLATFORMS_BY_KEY: dict[str, PlatformSpec] = {p.key: p for p in PLATFORMS}
+
+API_PLATFORMS: tuple[PlatformSpec, ...] = tuple(p for p in PLATFORMS if p.api_provider)
+
+
+@dataclass(frozen=True)
+class AssetTypeSpec:
+    key: str
+    label: str
+    group: AssetGroup
+    target_type: TargetType | None
+    icon: str
+    note: str = ""
+
+    @property
+    def targetable(self) -> bool:
+        return self.target_type is not None
+
+
+ASSET_TYPES: tuple[AssetTypeSpec, ...] = (
+    AssetTypeSpec("DOMAIN", "Domain", AssetGroup.NETWORK, TargetType.DOMAIN, "globe"),
+    AssetTypeSpec(
+        "WILDCARD",
+        "Wildcard",
+        AssetGroup.NETWORK,
+        TargetType.DOMAIN,
+        "asterisk",
+        "Added as the apex domain",
+    ),
+    AssetTypeSpec("URL", "URL", AssetGroup.NETWORK, TargetType.URL, "link"),
+    AssetTypeSpec(
+        "IP_ADDRESS", "IP address", AssetGroup.NETWORK, TargetType.IP, "server"
+    ),
+    AssetTypeSpec(
+        "CIDR", "CIDR range", AssetGroup.NETWORK, TargetType.IP_RANGE, "network"
+    ),
+    AssetTypeSpec(
+        "OTHER",
+        "Other",
+        AssetGroup.OTHER,
+        None,
+        "shapes",
+        "Free text. Detected ASNs and hostnames can be added",
+    ),
+    AssetTypeSpec(
+        "APPLE_STORE_APP_ID", "iOS App Store", AssetGroup.MOBILE, None, "smartphone"
+    ),
+    AssetTypeSpec("TESTFLIGHT", "TestFlight", AssetGroup.MOBILE, None, "smartphone"),
+    AssetTypeSpec("OTHER_IPA", "iOS .ipa", AssetGroup.MOBILE, None, "smartphone"),
+    AssetTypeSpec(
+        "GOOGLE_PLAY_APP_ID", "Google Play", AssetGroup.MOBILE, None, "smartphone"
+    ),
+    AssetTypeSpec("OTHER_APK", "Android .apk", AssetGroup.MOBILE, None, "smartphone"),
+    AssetTypeSpec(
+        "WINDOWS_APP_STORE_APP_ID",
+        "Microsoft Store",
+        AssetGroup.MOBILE,
+        None,
+        "app-window",
+    ),
+    AssetTypeSpec("SOURCE_CODE", "Source code", AssetGroup.CODE, None, "file-code"),
+    AssetTypeSpec(
+        "DOWNLOADABLE_EXECUTABLES", "Executable", AssetGroup.CODE, None, "binary"
+    ),
+    AssetTypeSpec("AI_MODEL", "AI model", AssetGroup.OTHER, None, "brain"),
+    AssetTypeSpec("HARDWARE", "Hardware / IoT", AssetGroup.OTHER, None, "cpu"),
+    AssetTypeSpec(
+        "SMART_CONTRACT", "Smart contract", AssetGroup.OTHER, None, "file-signature"
+    ),
+)
+
+ASSET_TYPES_BY_KEY: dict[str, AssetTypeSpec] = {a.key: a for a in ASSET_TYPES}
+
+UNKNOWN_ASSET_TYPE = AssetTypeSpec(
+    "UNKNOWN", "Unrecognised", AssetGroup.OTHER, None, "circle-help"
+)
+
+IMPORTABLE_TYPES: frozenset[str] = frozenset(
+    {a.key for a in ASSET_TYPES if a.targetable} | {"OTHER"}
+)
+
+
+@dataclass(frozen=True)
+class EventSpec:
+    kind: str
+    label: str
+    description: str
+    icon: str
+    tone: str
+    actionable: bool
+
+
+EVENTS: tuple[EventSpec, ...] = (
+    EventSpec(
+        BountyEvent.PROGRAM_ADDED.value,
+        "New program",
+        "A program appeared in the library",
+        "list-plus",
+        "info",
+        actionable=True,
+    ),
+    EventSpec(
+        BountyEvent.SCOPE_ADDED.value,
+        "Scope added",
+        "The program put a new asset in scope",
+        "plus",
+        "info",
+        actionable=True,
+    ),
+    EventSpec(
+        BountyEvent.CAME_INTO_SCOPE.value,
+        "Now in scope",
+        "An asset the program excluded is now testable",
+        "circle-check",
+        "info",
+        actionable=True,
+    ),
+    EventSpec(
+        BountyEvent.WENT_OUT_OF_SCOPE.value,
+        "Now out of scope",
+        "The program moved this asset out of scope",
+        "octagon-alert",
+        "warning",
+        actionable=True,
+    ),
+    EventSpec(
+        BountyEvent.SCOPE_REMOVED.value,
+        "Scope removed",
+        "The program no longer lists this asset",
+        "minus",
+        "warning",
+        actionable=True,
+    ),
+    EventSpec(
+        BountyEvent.SUBMISSIONS_OPENED.value,
+        "Accepting reports",
+        "The program reopened for submissions",
+        "door-open",
+        "info",
+        actionable=True,
+    ),
+    EventSpec(
+        BountyEvent.BOUNTIES_STARTED.value,
+        "Now pays bounties",
+        "The program moved from VDP to paying",
+        "banknote",
+        "info",
+        actionable=True,
+    ),
+    EventSpec(
+        BountyEvent.PROGRAM_WENT_PUBLIC.value,
+        "Went public",
+        "A private program became public",
+        "globe",
+        "muted",
+        actionable=False,
+    ),
+    EventSpec(
+        BountyEvent.SUBMISSIONS_CLOSED.value,
+        "Stopped accepting",
+        "The program paused or closed submissions",
+        "door-closed",
+        "muted",
+        actionable=False,
+    ),
+    EventSpec(
+        BountyEvent.PAYOUT_CHANGED.value,
+        "Payout changed",
+        "Minimum and maximum payout",
+        "banknote",
+        "info",
+        actionable=False,
+    ),
+    EventSpec(
+        BountyEvent.RULES_CHANGED.value,
+        "Rules changed",
+        "Safe harbor or the 2FA requirement changed",
+        "scroll-text",
+        "info",
+        actionable=False,
+    ),
+    EventSpec(
+        BountyEvent.ASSET_BOUNTY_CHANGED.value,
+        "Asset bounty changed",
+        "An asset's tier, bounty eligibility or severity cap changed",
+        "badge-dollar-sign",
+        "info",
+        actionable=False,
+    ),
+    EventSpec(
+        BountyEvent.ASSET_RULES_CHANGED.value,
+        "Asset rules changed",
+        "Testing instructions on one asset",
+        "file-pen",
+        "info",
+        actionable=False,
+    ),
+)
+
+EVENTS_BY_KIND: dict[str, EventSpec] = {e.kind: e for e in EVENTS}
+
+NOTIFIABLE_EVENTS: tuple[str, ...] = (
+    BountyEvent.PROGRAM_ADDED.value,
+    BountyEvent.SCOPE_ADDED.value,
+    BountyEvent.CAME_INTO_SCOPE.value,
+    BountyEvent.WENT_OUT_OF_SCOPE.value,
+    BountyEvent.SUBMISSIONS_OPENED.value,
+    BountyEvent.BOUNTIES_STARTED.value,
+)
+
+
+class SyncInterval(Enum):
+    OFF = "off"
+    SIX_HOURS = "six_hours"
+    DAILY = "daily"
+    WEEKLY = "weekly"
+
+
+SYNC_INTERVAL_HOURS: dict[str, int] = {
+    SyncInterval.SIX_HOURS.value: 6,
+    SyncInterval.DAILY.value: 24,
+    SyncInterval.WEEKLY.value: 24 * 7,
+}
+
+DEFAULT_FEED_INTERVAL = SyncInterval.SIX_HOURS.value
+
+DEFAULT_SYNC_INTERVAL = SyncInterval.DAILY.value
+DEFAULT_NOTIFY = True
+DEFAULT_NOTIFY_EVENTS: tuple[str, ...] = NOTIFIABLE_EVENTS
+
+
+def notify_events(settings: dict | None) -> set[str]:
+    """Which change kinds may alert, falling back to every notifiable kind."""
+    stored = (settings or {}).get("notify_events")
+    if not isinstance(stored, list):
+        return set(DEFAULT_NOTIFY_EVENTS)
+    return {k for k in stored if k in NOTIFIABLE_EVENTS}
+
+
+def notify_enabled(settings: dict | None) -> bool:
+    value = (settings or {}).get("notify")
+    return DEFAULT_NOTIFY if value is None else bool(value)
+
+
+MAX_TAGS_PER_IMPORT = 10
+MAX_EVENT_DETAIL = 500
+MAX_TARGET_VALUE = 500
+MAX_TIER = 32
+
+_NO_TIER = frozenset({"out of scope", "outofscope", "none", "n/a"})
+
+
+def scope_tier(raw: str | None) -> str | None:
+    """The payout band a program puts an asset in."""
+    value = strip_control(str(raw or "")).strip()
+    if not value or value.lower() in _NO_TIER:
+        return None
+    return value[:MAX_TIER]
+
+
+MAX_SEVERITIES: tuple[str, ...] = ("critical", "high", "medium", "low", "none")
+
+_SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*://", re.I)
+_HOSTNAME_TYPES = frozenset({TargetType.DOMAIN, TargetType.URL})
+_IPV6_HOST = re.compile(r"^\[([^\]]+)\]")
+
+
+def event_spec(kind: str) -> EventSpec:
+    return EVENTS_BY_KIND.get(
+        kind, EventSpec(kind, kind, "", "circle-help", "muted", actionable=False)
+    )
+
+
+def asset_type_spec(key: str | None) -> AssetTypeSpec:
+    return ASSET_TYPES_BY_KEY.get((key or "").upper(), UNKNOWN_ASSET_TYPE)
+
+
+def scope_state(eligible_for_submission: bool | None) -> ScopeState:
+    return ScopeState.IN_SCOPE if eligible_for_submission else ScopeState.OUT_OF_SCOPE
+
+
+PUBLIC_STATE = "public_mode"
+
+RAW_STATE_LABELS: dict[str, str] = {
+    "public_mode": "Public",
+    "soft_launched": "Soft launched",
+    "private_mode": "Private",
+}
+
+
+def program_state(raw: str | None) -> ProgramState:
+    return ProgramState.PUBLIC if raw == PUBLIC_STATE else ProgramState.PRIVATE
+
+
+def raw_state_label(raw: str | None) -> str:
+    value = (raw or "").strip()
+    return RAW_STATE_LABELS.get(
+        value, value.replace("_", " ").capitalize() or "Unknown"
+    )
+
+
+def submission_state(raw: str | None) -> SubmissionState:
+    value = (raw or "").lower()
+    if value == "open":
+        return SubmissionState.OPEN
+    if value == "paused":
+        return SubmissionState.PAUSED
+    return SubmissionState.CLOSED
+
+
+def normalize_identifier(asset_type: str | None, identifier: str) -> str | None:
+    """The scannable value behind a scope entry, or None when there is not one."""
+    value = strip_control(identifier or "").strip()
+    if not value:
+        return None
+    spec = asset_type_spec(asset_type)
+    if spec.key not in IMPORTABLE_TYPES:
+        return None
+
+    stripped = _SCHEME.sub("", value).strip()
+    host = stripped.split("/")[0]
+    if host.startswith("*."):
+        value = host
+    elif spec.key == "URL":
+        pass
+    elif spec.key == "CIDR":
+        value = stripped
+    else:
+        value = host
+    value = normalize_target_value(value)
+    if not value or "*" in value or len(value) > MAX_TARGET_VALUE:
+        return None
+    return value
+
+
+def _public_host(value: str) -> bool:
+    """Whether the host is internet-facing."""
+    authority = _SCHEME.sub("", value).split("/")[0].split("?")[0]
+    bracketed = _IPV6_HOST.match(authority)
+    host = bracketed.group(1) if bracketed else authority.rsplit(":", 1)[0]
+    with contextlib.suppress(ValueError):
+        ipaddress.ip_address(host)
+        return True
+    return bool(validators.domain(host, consider_tld=True))
+
+
+def _canonical(value: str, target_type: TargetType) -> str:
+    """Stored casing for this target type."""
+    if target_type is TargetType.ASN:
+        return value.upper()
+    if target_type is TargetType.URL:
+        return value
+    return value.lower()
+
+
+def target_for_scope(
+    asset_type: str | None, identifier: str
+) -> tuple[str, TargetType] | None:
+    """Normalize a scope entry and validate it as a target."""
+    value = normalize_identifier(asset_type, identifier)
+    if not value:
+        return None
+    target_type = validate_target(value)
+    if not target_type:
+        return None
+    if target_type in _HOSTNAME_TYPES and not _public_host(value):
+        return None
+    return _canonical(value, target_type), target_type

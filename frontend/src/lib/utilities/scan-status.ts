@@ -1,0 +1,241 @@
+import Clock from '@lucide/svelte/icons/clock';
+import LoaderCircle from '@lucide/svelte/icons/loader-circle';
+import CircleCheck from '@lucide/svelte/icons/circle-check';
+import CircleX from '@lucide/svelte/icons/circle-x';
+import CircleMinus from '@lucide/svelte/icons/circle-minus';
+import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
+import Ban from '@lucide/svelte/icons/ban';
+import Radio from '@lucide/svelte/icons/radio';
+import Pause from '@lucide/svelte/icons/pause';
+import type { ScanActivityStatus, ScanRead, ScanStatus, ScanStatusCounts } from '$lib/types/scan';
+import type { BadgeVariant } from '$lib/components/ui/badge';
+import type { IconComponent } from '$lib/config/icons';
+import { SURFACE_ORDER, SurfaceDimension } from '$lib/config/surface';
+
+export const SCAN_STATUS_LABEL: Record<ScanStatus, string> = {
+	pending: 'Queued',
+	running: 'Running',
+	paused: 'Paused',
+	completed: 'Completed',
+	failed: 'Failed',
+	cancelled: 'Cancelled'
+};
+
+export const SCAN_STATUS_VARIANT: Record<ScanStatus, BadgeVariant> = {
+	pending: 'secondary',
+	running: 'info',
+	paused: 'secondary',
+	completed: 'success',
+	failed: 'destructive',
+	cancelled: 'outline'
+};
+
+export const SCAN_STATUS_DOT: Record<ScanStatus, string> = {
+	completed: 'border-success bg-success',
+	cancelled: 'border-warning bg-warning',
+	failed: 'border-destructive bg-destructive',
+	running: 'border-info bg-info shadow-[0_0_0_4px_color-mix(in_oklch,var(--info)_18%,transparent)]',
+	paused: 'border-muted-foreground bg-muted-foreground',
+	pending: 'border-muted-foreground bg-card'
+};
+
+export const SCAN_STATUS_PILL: Record<ScanStatus, string> = {
+	completed: 'bg-success/10 text-success',
+	cancelled: 'bg-warning/12 text-warning',
+	failed: 'bg-destructive/10 text-destructive',
+	running: 'bg-info/10 text-info',
+	paused: 'bg-muted text-foreground',
+	pending: 'bg-muted text-muted-foreground'
+};
+
+export function scanStatusVariant(s: ScanStatus): BadgeVariant {
+	return SCAN_STATUS_VARIANT[s];
+}
+
+export function scanStatusIcon(s: ScanStatus): IconComponent {
+	switch (s) {
+		case 'running':
+			return LoaderCircle;
+		case 'pending':
+			return Clock;
+		case 'paused':
+			return Pause;
+		case 'completed':
+			return CircleCheck;
+		case 'cancelled':
+			return Ban;
+		default:
+			return TriangleAlert;
+	}
+}
+
+export function isLiveStatus(s: ScanStatus): boolean {
+	return s === 'running' || s === 'pending';
+}
+
+/** Unfinished: still moving, or paused and able to resume. Mirrors SCAN_OPEN_STATUSES. */
+export function isOpenStatus(s: ScanStatus): boolean {
+	return isLiveStatus(s) || s === 'paused';
+}
+
+export type ScanStatusTab = 'all' | 'active' | 'paused' | 'completed' | 'failed' | 'cancelled';
+
+export const SCAN_STATUS_TABS: { key: ScanStatusTab; label: string; statuses: ScanStatus[] }[] = [
+	{ key: 'all', label: 'All', statuses: [] },
+	{ key: 'active', label: 'Active', statuses: ['running', 'pending'] },
+	{ key: 'paused', label: 'Paused', statuses: ['paused'] },
+	{ key: 'completed', label: 'Completed', statuses: ['completed'] },
+	{ key: 'failed', label: 'Failed', statuses: ['failed'] },
+	{ key: 'cancelled', label: 'Cancelled', statuses: ['cancelled'] }
+];
+
+const tabKey = (statuses: ScanStatus[]) => [...statuses].sort().join(',');
+
+export function scanStatusTab(statuses: ScanStatus[]): ScanStatusTab {
+	const key = tabKey(statuses);
+	return SCAN_STATUS_TABS.find((t) => tabKey(t.statuses) === key)?.key ?? 'all';
+}
+
+export function scanStatusTabCount(
+	tab: ScanStatusTab,
+	counts: ScanStatusCounts,
+	total: number
+): number {
+	if (tab === 'all') return total;
+	const statuses = SCAN_STATUS_TABS.find((t) => t.key === tab)?.statuses ?? [];
+	return statuses.reduce((n, s) => n + counts[s], 0);
+}
+
+export function activityStatusIcon(s: ScanActivityStatus): IconComponent {
+	switch (s) {
+		case 'running':
+			return LoaderCircle;
+		case 'pending':
+			return Clock;
+		case 'paused':
+			return Pause;
+		case 'success':
+			return CircleCheck;
+		case 'partial':
+			return TriangleAlert;
+		case 'failed':
+			return CircleX;
+		case 'aborted':
+			return Ban;
+		default:
+			return CircleMinus;
+	}
+}
+
+export function activityStatusClass(s: ScanActivityStatus): string {
+	switch (s) {
+		case 'failed':
+			return 'text-destructive';
+		case 'partial':
+		case 'aborted':
+		case 'skipped':
+			return 'text-warning';
+		case 'success':
+			return 'text-success';
+		case 'running':
+			return 'text-info';
+		default:
+			return 'text-muted-foreground';
+	}
+}
+
+export const activityRan = (s: ScanActivityStatus | undefined): boolean =>
+	s === 'success' || s === 'partial';
+
+export const ACTIVITY_STATUS_LABEL: Record<ScanActivityStatus, string> = {
+	pending: 'Queued',
+	running: 'Running',
+	paused: 'Paused',
+	success: 'Success',
+	partial: 'Partial',
+	failed: 'Failed',
+	skipped: 'Skipped',
+	aborted: 'Aborted'
+};
+
+const HIDDEN_RESULT_KEYS = new Set(['excluded', 'reason']);
+
+export function activitySummary(result: Record<string, number | string> | undefined): string {
+	return Object.entries(result ?? {})
+		.filter(([k, v]) => typeof v === 'number' && !HIDDEN_RESULT_KEYS.has(k))
+		.map(([k, v]) => `${v.toLocaleString()} ${k.replace(/_/g, ' ')}`)
+		.join(' · ');
+}
+
+export const SCAN_POLL_MS = 4000;
+export const RESULTS_PAGE_SIZE = 50;
+export const SEARCH_DEBOUNCE_MS = 220;
+
+export function elapsedSeconds(scan: ScanRead, now: number = Date.now()): number | null {
+	if (!isLiveStatus(scan.status) || !scan.started_at) return null;
+	const ran = (now - new Date(scan.started_at).getTime()) / 1000 - (scan.paused_seconds ?? 0);
+	return Math.max(0, ran);
+}
+
+export function formatSeconds(total: number): string {
+	const t = Math.round(total);
+	if (t < 60) return `${t}s`;
+	const minutes = Math.floor(t / 60);
+	if (minutes < 60) {
+		const s = t % 60;
+		return s ? `${minutes}m ${s}s` : `${minutes}m`;
+	}
+	const h = Math.floor(minutes / 60);
+	const m = minutes % 60;
+	return m ? `${h}h ${m}m` : `${h}h`;
+}
+
+export function elapsedText(total: number): string {
+	const minutes = Math.floor(total / 60);
+	if (minutes < 1) return '<1m';
+	if (minutes < 60) return `${minutes}m`;
+	const h = Math.floor(minutes / 60);
+	const m = minutes % 60;
+	return m ? `${h}h ${m}m` : `${h}h`;
+}
+
+export function durationText(seconds: number | null, fractional = false): string {
+	if (seconds == null) return '';
+	if (seconds < 60) return fractional ? `${seconds.toFixed(1)}s` : `${Math.round(seconds)}s`;
+	return formatSeconds(seconds);
+}
+
+export function durationLabel(scan: ScanRead, now: number = Date.now()): string {
+	const live = elapsedSeconds(scan, now);
+	if (live != null) return elapsedText(live);
+	if (scan.duration_seconds == null) return '—';
+	return formatSeconds(scan.duration_seconds);
+}
+
+export interface CountPill {
+	key: string;
+	icon: IconComponent;
+	label: string;
+	value: number;
+	emphasis: boolean;
+}
+
+export function scanCountPills(scan: ScanRead): CountPill[] {
+	const pills: CountPill[] = SURFACE_ORDER.filter((spec) => spec.countColumns.length).map(
+		(spec) => ({
+			key: spec.key,
+			icon: spec.icon,
+			label: spec.label,
+			value: (scan[spec.countColumns[0]] as number) ?? 0,
+			emphasis: spec.key === SurfaceDimension.VULNERABILITIES && scan.vulnerabilities_found > 0
+		})
+	);
+	pills.push({
+		key: 'http',
+		icon: Radio,
+		label: 'HTTP responses',
+		value: scan.http_assets_found,
+		emphasis: false
+	});
+	return pills;
+}

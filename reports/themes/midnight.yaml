@@ -1,0 +1,42 @@
+key: midnight
+name: Midnight
+description: Dark cover, indigo accent, light page.
+author: reNgine
+version: "3"
+color:
+  page: "#ffffff"
+  ink: "#232932"
+  ink_soft: "#6b7178"
+  ink_faint: "#8f949b"
+  rule: "#eceef0"
+  rule_strong: "#dbdee2"
+  surface: "#f7f8fa"
+  surface_soft: "#fbfcfd"
+  accent: "#576cde"
+  accent_soft: "#f1f5ff"
+  accent_ink: "#ffffff"
+type:
+  heading: inter
+  body: inter
+  mono: jetbrains-mono
+  base_size: 10.5
+  scale: 1.24
+  line_height: 1.6
+  heading_weight: 600
+  heading_tracking: -0.02
+  label_tracking: 0.02
+  uppercase_labels: false
+layout:
+  rule_width: 0.5
+  radius: 5
+  pill: true
+  block_gap: 1.1
+  table: hairline
+  finding: rail
+  heading: numbered
+cover:
+  layout: full
+  art: mesh
+  ink: light
+  background: "#171b2b"
+  accent_bar: true

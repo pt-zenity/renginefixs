@@ -1,0 +1,42 @@
+key: editorial
+name: Editorial
+description: Display headings and generous spacing.
+author: reNgine
+version: "3"
+color:
+  page: "#fffdfa"
+  ink: "#2b2723"
+  ink_soft: "#736c64"
+  ink_faint: "#9a938a"
+  rule: "#f0ece5"
+  rule_strong: "#e0dbd2"
+  surface: "#faf7f2"
+  surface_soft: "#fdfbf8"
+  accent: "#9354ce"
+  accent_soft: "#faf4ff"
+  accent_ink: "#ffffff"
+type:
+  heading: space-grotesk
+  body: inter
+  mono: ibm-plex-mono
+  base_size: 11.0
+  scale: 1.3
+  line_height: 1.64
+  heading_weight: 600
+  heading_tracking: -0.026
+  label_tracking: 0.02
+  uppercase_labels: false
+layout:
+  rule_width: 0.5
+  radius: 8
+  pill: true
+  block_gap: 1.35
+  table: open
+  finding: plain
+  heading: kicker
+cover:
+  layout: split
+  art: rings
+  ink: light
+  background: "#3b1a66"
+  accent_bar: false

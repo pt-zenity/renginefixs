@@ -1,0 +1,197 @@
+from __future__ import annotations
+
+import contextlib
+from collections.abc import Iterator
+
+from shared.definitions.constants import HTTPX_RESPONSE_CAP
+from shared.logging import get_logger
+from tools.runner import CLIToolRunner, StreamOutcome, ToolNotFoundError
+from tools.runner.models import CommandRecorder
+
+logger = get_logger(__name__)
+
+HTTPX_BINARY = "httpx"
+DEFAULT_TIMEOUT = 900
+
+# httpx spells it -H/-header
+HTTPX_ALIASES: dict[str, str] = {
+    "-H": "-header",
+    "-l": "-list",
+    "-o": "-output",
+    "-p": "-ports",
+    "-rl": "-rate-limit",
+    "-t": "-threads",
+    "-sr": "-store-response",
+    "-td": "-tech-detect",
+}
+HEADER_FLAG = "-header"
+
+# without this httpx retries the other scheme when the named one fails
+NO_FALLBACK_FLAG = "-no-fallback-scheme"
+
+_IDLE_FLOOR = 300
+_IDLE_TIMEOUT_FACTOR = 6
+_CAPTURE_IDLE_FLOOR = 300
+
+_RESPONSE_SIZE_CAP = HTTPX_RESPONSE_CAP
+
+_ENRICH_FLAGS = [
+    "-probe",
+    "-stream",
+    "-status-code",
+    "-title",
+    "-tech-detect",
+    "-web-server",
+    "-content-length",
+    "-content-type",
+    "-location",
+    "-ip",
+    "-cname",
+    "-cdn",
+    "-tls-grab",
+    "-jarm",
+    "-favicon",
+    "-hash",
+    "sha256",
+    "-http2",
+    "-pipeline",
+    "-include-response",
+    "-body-preview",
+    "-response-size-to-read",
+    str(_RESPONSE_SIZE_CAP),
+    "-no-color",
+]
+
+
+def _answered(records: Iterator[dict]) -> Iterator[dict]:
+    """Drop the per-input line -probe emits for a host that did not answer."""
+    for record in records:
+        if record.get("failed"):
+            continue
+        yield record
+
+
+class HttpxError(Exception):
+    pass
+
+
+class HttpxClient:
+    def __init__(
+        self,
+        *,
+        rate_limit: int | None = None,
+        threads: int = 50,
+        timeout: int = 10,
+        proxy_url: str | None = None,
+        headers: dict[str, str] | None = None,
+        follow_redirects: bool = True,
+        store_dir: str | None = None,
+        probe_scheme: str | None = None,
+        recorder: CommandRecorder | None = None,
+        extra_args: list[str] | None = None,
+    ) -> None:
+        self.rate_limit = rate_limit
+        self.threads = threads
+        self.timeout = timeout
+        self.proxy_url = proxy_url
+        self.headers = headers or {}
+        self.follow_redirects = follow_redirects
+        self.store_dir = store_dir
+        self.probe_scheme = probe_scheme
+        self.recorder = recorder
+        self.extra_args = extra_args or []
+
+        try:
+            self._runner = CLIToolRunner(
+                HTTPX_BINARY, default_timeout=DEFAULT_TIMEOUT, aliases=HTTPX_ALIASES
+            )
+        except ToolNotFoundError as e:
+            raise HttpxError(str(e)) from e
+
+    def _scoped(self, targets: list[str]) -> list[str]:
+        """Name the scheme on every bare target when the run allows only one."""
+        if not self.probe_scheme:
+            return targets
+        return [
+            target if "://" in target else f"{self.probe_scheme}://{target}"
+            for target in targets
+        ]
+
+    @contextlib.contextmanager
+    def stream_probe(self, targets: list[str]) -> Iterator[StreamOutcome]:
+        """Probe targets, streaming parsed httpx records one at a time (memory-bounded)."""
+        if not targets:
+            yield StreamOutcome(records=iter(()), return_code=0)
+            return
+        args = list(_ENRICH_FLAGS)
+        if self.follow_redirects:
+            args.append("-follow-redirects")
+        if self.rate_limit:
+            args += ["-rate-limit", str(self.rate_limit)]
+        args += ["-threads", str(self.threads), "-timeout", str(self.timeout)]
+        if self.proxy_url:
+            args += ["-proxy", self.proxy_url]
+        for key, value in self.headers.items():
+            args += [HEADER_FLAG, f"{key}: {value}"]
+        if self.probe_scheme:
+            args.append(NO_FALLBACK_FLAG)
+
+        with self._runner.stream_json(
+            args=args,
+            input_data=self._scoped(targets),
+            input_flag="-l",
+            json_flag="-json",
+            silent=True,
+            silent_flag="-silent",
+            timeout=0,
+            idle_timeout=max(_IDLE_FLOOR, self.timeout * _IDLE_TIMEOUT_FACTOR),
+            recorder=self.recorder,
+            tool=HTTPX_BINARY,
+            extra_args=self.extra_args,
+        ) as stream:
+            stream.records = _answered(stream.records)
+            yield stream
+
+    def _capture_args(self) -> list[str]:
+        args = [
+            "-status-code",
+            "-screenshot",
+            "-system-chrome",
+            "-exclude-screenshot-bytes",
+            "-no-color",
+        ]
+        if self.store_dir:
+            args += ["-store-response-dir", self.store_dir]
+        if self.follow_redirects:
+            args.append("-follow-redirects")
+        if self.rate_limit:
+            args += ["-rate-limit", str(self.rate_limit)]
+        args += ["-threads", str(self.threads), "-timeout", str(max(self.timeout, 20))]
+        if self.proxy_url:
+            args += ["-proxy", self.proxy_url]
+        for key, value in self.headers.items():
+            args += [HEADER_FLAG, f"{key}: {value}"]
+        if self.probe_scheme:
+            args.append(NO_FALLBACK_FLAG)
+        return args
+
+    @contextlib.contextmanager
+    def stream_capture(self, targets: list[str]) -> Iterator[StreamOutcome]:
+        """The same render, streaming each image as the browser finishes it."""
+        if not targets:
+            yield StreamOutcome(records=iter(()), return_code=0)
+            return
+        with self._runner.stream_json(
+            args=self._capture_args(),
+            input_data=self._scoped(targets),
+            input_flag="-l",
+            json_flag="-json",
+            silent=True,
+            silent_flag="-silent",
+            timeout=0,
+            idle_timeout=max(_CAPTURE_IDLE_FLOOR, self.timeout * _IDLE_TIMEOUT_FACTOR),
+            recorder=self.recorder,
+            tool=HTTPX_BINARY,
+            extra_args=self.extra_args,
+        ) as stream:
+            yield stream

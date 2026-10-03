@@ -1,0 +1,328 @@
+"""What a project-wide result view is looking at: the latest covering scan per target."""
+
+from __future__ import annotations
+
+from datetime import timedelta
+from uuid import UUID
+
+from pydantic import BaseModel
+from sqlalchemy import cast, distinct, exists, func, not_, select
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
+
+from app.services.asset_query import QueryScope, vuln_suppressed
+from app.services.target_scope import Targets
+from shared.definitions.asset_query import COUNT_CAP
+from shared.definitions.dashboard import STALE_DAYS
+from shared.definitions.new_checks import NEW_CHECKS_KEY
+from shared.definitions.surface import (
+    SURFACE_LABELS,
+    SURFACE_NOUN,
+    SURFACE_ORDER,
+    SurfaceDimension,
+)
+from shared.enums.scan import SCAN_LIVE_STATUSES, ScanScope, ScanStatus
+from shared.models.endpoint import Endpoint
+from shared.models.ip_address import IpAddress
+from shared.models.port import Port
+from shared.models.scan import Scan
+from shared.models.secret import Secret
+from shared.models.software import SoftwareCve
+from shared.models.subdomain import Subdomain
+from shared.models.surface import SurfaceCoverage, SurfaceOverview, SurfaceTargetRead
+from shared.models.target import Target
+from shared.models.vulnerability import Vulnerability
+from shared.services.asset_query import lead_cache
+from shared.services.scan_scope import census_only, covers
+from shared.utils.datetime import utc_now
+
+
+class _Count(BaseModel):
+    n: int = 0
+
+
+TABLES = {
+    SurfaceDimension.WEB_ASSETS.value: Subdomain,
+    SurfaceDimension.ENDPOINTS.value: Endpoint,
+    SurfaceDimension.SERVICES.value: Port,
+    SurfaceDimension.IPS.value: IpAddress,
+    SurfaceDimension.VULNERABILITIES.value: Vulnerability,
+    SurfaceDimension.SOFTWARE.value: SoftwareCve,
+    SurfaceDimension.SECRETS.value: Secret,
+}
+
+# dimensions whose page headlines a true total, not a paged one
+EXACT_COUNT = frozenset(
+    {SurfaceDimension.SOFTWARE.value, SurfaceDimension.SECRETS.value}
+)
+
+
+async def baselined_targets(
+    session: AsyncSession, model, scope: QueryScope
+) -> set[UUID]:
+    """The scope's targets an earlier scan already recorded this dimension for."""
+    if not scope.ids:
+        return set()
+    earlier = aliased(model)
+    cutoff = (
+        select(func.min(model.discovered_at))
+        .where(model.scan_id == Scan.id)
+        .correlate(Scan)
+        .scalar_subquery()
+    )
+    rows = await session.execute(
+        select(Scan.target_id).where(
+            Scan.id.in_(scope.ids),
+            exists(
+                select(1).where(
+                    earlier.target_id == Scan.target_id,
+                    earlier.scan_id != Scan.id,
+                    earlier.discovered_at < cutoff,
+                )
+            ),
+        )
+    )
+    return {row[0] for row in rows.all()}
+
+
+def _started():
+    return func.coalesce(Scan.started_at, Scan.created_at)
+
+
+class SurfaceScopeService:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+        self._picked: dict[tuple[UUID, str], list] = {}
+        self._targets_by_project: dict[UUID, dict[UUID, Target]] = {}
+
+    async def scope(
+        self, project_id: UUID, dimension: str, targets: Targets = None
+    ) -> QueryScope:
+        picks = await self._picks(project_id, dimension)
+        if targets is not None:
+            picks = [row for row in picks if row.target_id in targets]
+        ids = [row.id for row in picks]
+        if dimension == SurfaceDimension.VULNERABILITIES.value:
+            ids.extend(await self._follow_ups(project_id, picks))
+        return QueryScope(tuple(ids), project_id=project_id)
+
+    async def _follow_ups(self, project_id: UUID, picks) -> list[UUID]:
+        """New-checks runs completed after each target's census pick."""
+        if not picks:
+            return []
+        at_by_target = {row.target_id: row.at for row in picks}
+        rows = await self.session.execute(
+            select(Scan.id, Scan.target_id, _started().label("at")).where(
+                Scan.project_id == project_id,
+                Scan.scope == ScanScope.FOCUSED.value,
+                Scan.status == ScanStatus.COMPLETED.value,
+                cast(Scan.execution_config, JSONB).has_key(NEW_CHECKS_KEY),
+                Scan.target_id.in_(list(at_by_target)),
+            )
+        )
+        return [
+            row.id
+            for row in rows.all()
+            if row.at is not None and row.at > at_by_target[row.target_id]
+        ]
+
+    async def scans_by_target(
+        self, project_id: UUID, dimension: str
+    ) -> dict[UUID, UUID]:
+        picks = await self._picks(project_id, dimension)
+        return {row.target_id: row.id for row in picks}
+
+    async def _picks(self, project_id: UUID, dimension: str):
+        """The newest scan of each target that actually ran this dimension."""
+        cached = self._picked.get((project_id, dimension))
+        if cached is not None:
+            return cached
+        model = TABLES[dimension]
+        rows = await self.session.execute(
+            select(Scan.id, Scan.target_id, Scan.status, _started().label("at"))
+            .where(
+                Scan.project_id == project_id,
+                census_only(),
+                covers(model, dimension),
+            )
+            .distinct(Scan.target_id)
+            .order_by(Scan.target_id, _started().desc())
+        )
+        picks = list(rows.all())
+        self._picked[(project_id, dimension)] = picks
+        return picks
+
+    async def _targets(self, project_id: UUID) -> dict[UUID, Target]:
+        cached = self._targets_by_project.get(project_id)
+        if cached is not None:
+            return cached
+        rows = await self.session.execute(
+            select(Target).where(Target.project_id == project_id)
+        )
+        targets = {row.id: row for row in rows.scalars().all()}
+        self._targets_by_project[project_id] = targets
+        return targets
+
+    async def _count(self, dimension: str, scope: QueryScope) -> tuple[int, bool]:
+        if not scope:
+            return 0, False
+        if dimension == SurfaceDimension.IPS.value:
+            from app.services.ip_address import IpAddressService  # noqa: PLC0415
+
+            derived = IpAddressService._derived(scope)
+            inner = select(derived.c.ip).select_from(derived)
+        else:
+            model = TABLES[dimension]
+            inner = select(model.id).where(scope.match(model.scan_id))
+            if dimension == SurfaceDimension.VULNERABILITIES.value:
+                inner = inner.where(not_(vuln_suppressed(scope)))
+        if dimension in EXACT_COUNT:
+            counted = await self.session.scalar(
+                select(func.count()).select_from(inner.subquery())
+            )
+            return int(counted or 0), False
+        counted = await self.session.scalar(
+            select(func.count()).select_from(inner.limit(COUNT_CAP + 1).subquery())
+        )
+        total = int(counted or 0)
+        return min(total, COUNT_CAP), total > COUNT_CAP
+
+    async def coverage(
+        self, project_id: UUID, dimension: str, *, counts: bool = True
+    ) -> SurfaceCoverage:
+        picks = await self._picks(project_id, dimension)
+        targets = await self._targets(project_id)
+        scope = await self.scope(project_id, dimension)
+        noun, noun_plural = SURFACE_NOUN[dimension]
+        out = SurfaceCoverage(
+            dimension=dimension,
+            label=SURFACE_LABELS[dimension],
+            noun=noun,
+            noun_plural=noun_plural,
+            targets_total=len(targets),
+        )
+        cutoff = utc_now() - timedelta(days=STALE_DAYS)
+        seen: set[UUID] = set()
+        for row in picks:
+            target = targets.get(row.target_id)
+            if target is None:
+                continue
+            seen.add(row.target_id)
+            out.covered.append(
+                SurfaceTargetRead(
+                    target_id=target.id,
+                    target_value=target.target_value,
+                    target_type=target.target_type,
+                    scan_id=row.id,
+                    scan_status=row.status,
+                    observed_at=row.at,
+                    stale=bool(row.at and row.at < cutoff),
+                )
+            )
+        out.covered.sort(key=lambda r: r.target_value)
+        out.uncovered = sorted(
+            (
+                SurfaceTargetRead(
+                    target_id=target.id,
+                    target_value=target.target_value,
+                    target_type=target.target_type,
+                )
+                for target_id, target in targets.items()
+                if target_id not in seen
+            ),
+            key=lambda r: r.target_value,
+        )
+        out.targets_covered = len(out.covered)
+        stamps = [r.observed_at for r in out.covered if r.observed_at]
+        out.observed_from = min(stamps) if stamps else None
+        out.observed_to = max(stamps) if stamps else None
+        if counts:
+            out.total, out.total_capped = await self._count(dimension, scope)
+        return out
+
+    async def overview(self, project_id: UUID) -> SurfaceOverview:
+        targets_total = await self.session.scalar(
+            select(func.count()).select_from(
+                select(Target.id).where(Target.project_id == project_id).subquery()
+            )
+        )
+        live = await self.session.scalar(
+            select(func.count(distinct(Scan.id))).where(
+                Scan.project_id == project_id,
+                Scan.status.in_(SCAN_LIVE_STATUSES),
+            )
+        )
+        out = SurfaceOverview(
+            project_id=project_id,
+            targets_total=int(targets_total or 0),
+            live_scans=int(live or 0),
+            generated_at=utc_now(),
+        )
+        for dimension in SURFACE_ORDER:
+            scope = await self.scope(project_id, dimension)
+            out.dimensions.append(
+                await lead_cache.cached(
+                    self.session,
+                    name=f"surface_coverage:{dimension}",
+                    scans=scope.ids,
+                    facets=str(project_id),
+                    model=SurfaceCoverage,
+                    build=lambda dimension=dimension: self.coverage(
+                        project_id, dimension
+                    ),
+                )
+            )
+        out.exposures = await self._exposures(project_id)
+        out.cves = await self._cves(project_id)
+        return out
+
+    async def _cves(self, project_id: UUID) -> int:
+        """Distinct CVEs a check reported or a version implies."""
+        from app.services.cve_exposure import CveExposureService  # noqa: PLC0415
+
+        software = await self.scope(project_id, SurfaceDimension.SOFTWARE.value)
+        findings = await self.scope(project_id, SurfaceDimension.VULNERABILITIES.value)
+        if not software and not findings:
+            return 0
+
+        async def _count() -> _Count:
+            counted = await CveExposureService(self.session).total(project_id)
+            return _Count(n=counted)
+
+        return (
+            await lead_cache.cached(
+                self.session,
+                name="surface_cves",
+                scans=tuple(sorted(set(software.ids) | set(findings.ids))),
+                facets=str(project_id),
+                model=_Count,
+                build=_count,
+            )
+        ).n
+
+    async def _exposures(self, project_id: UUID) -> int:
+        """Assets flagged for what they are."""
+        scope = await self.scope(project_id, SurfaceDimension.WEB_ASSETS.value)
+        if not scope:
+            return 0
+
+        async def _count() -> _Count:
+            counted = await self.session.scalar(
+                select(func.count()).where(
+                    scope.match(Subdomain.scan_id),
+                    Subdomain.interest_band.isnot(None),
+                )
+            )
+            return _Count(n=int(counted or 0))
+
+        return (
+            await lead_cache.cached(
+                self.session,
+                name="surface_exposures",
+                scans=scope.ids,
+                facets=str(project_id),
+                model=_Count,
+                build=_count,
+            )
+        ).n

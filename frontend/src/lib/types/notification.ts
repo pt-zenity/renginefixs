@@ -1,0 +1,57 @@
+import type { MessageLevel } from '$lib/types/message-level';
+
+export const NOTIFICATION_TYPES = [
+	'scan',
+	'system',
+	'security',
+	'vulnerability',
+	'target',
+	'resource',
+	'integration',
+	'watch',
+	'new_checks',
+	'tripwire'
+] as const;
+
+export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
+
+export const NOTIFICATION_TYPE_LABELS: Record<NotificationType, string> = {
+	scan: 'Scan',
+	system: 'System',
+	security: 'Security',
+	vulnerability: 'Vulnerability',
+	target: 'Target',
+	resource: 'Resource',
+	integration: 'Programs',
+	watch: 'Watch',
+	new_checks: 'New checks',
+	tripwire: 'Tripwire'
+};
+
+export type NotificationSeverity = MessageLevel;
+
+export interface NotificationMetadata {
+	url?: string;
+	open_new_tab?: boolean;
+	scan_id?: string;
+	target_id?: string;
+	action_label?: string;
+}
+
+export interface Notification {
+	id: number;
+	project_id?: string | null;
+	type: NotificationType;
+	severity: NotificationSeverity;
+	title: string;
+	message: string;
+	notification_metadata: NotificationMetadata;
+	is_read: boolean;
+	created_at: string;
+	expires_at: string;
+}
+
+export interface NotificationStats {
+	total: number;
+	unread: number;
+}

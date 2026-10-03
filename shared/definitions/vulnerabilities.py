@@ -1,0 +1,396 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+
+MAX_TEMPLATE_BYTES = 512_000
+MAX_TEMPLATE_UPLOAD = 50
+MAX_SELECTED_TEMPLATES = 2000
+MAX_FINDINGS_PER_SCAN = 20_000
+MAX_EVIDENCE_BYTES = 100_000
+
+OFFICIAL_ROOT = "/app/vuln-templates/official"
+CUSTOM_ROOT = "/app/vuln-templates/custom"
+
+
+class Severity(StrEnum):
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    INFO = "info"
+    UNKNOWN = "unknown"
+
+
+SEVERITY_ORDER: tuple[str, ...] = tuple(s.value for s in Severity)
+
+SEVERITY_RANK: dict[str, int] = {s: i for i, s in enumerate(SEVERITY_ORDER)}
+
+SEVERITY_LABELS: dict[str, str] = {
+    Severity.CRITICAL.value: "Critical",
+    Severity.HIGH.value: "High",
+    Severity.MEDIUM.value: "Medium",
+    Severity.LOW.value: "Low",
+    Severity.INFO.value: "Info",
+    Severity.UNKNOWN.value: "Unknown",
+}
+
+SEVERITY_HELP: dict[str, str] = {
+    Severity.CRITICAL.value: "Exploitable now. System or data compromise.",
+    Severity.HIGH.value: "Direct path to compromise with one further condition.",
+    Severity.MEDIUM.value: "Exploitable under specific conditions.",
+    Severity.LOW.value: "Hygiene defect.",
+    Severity.INFO.value: "An observation, not a weakness.",
+    Severity.UNKNOWN.value: "The check did not state a severity.",
+}
+
+ACTIONABLE_SEVERITIES: tuple[str, ...] = (
+    Severity.CRITICAL.value,
+    Severity.HIGH.value,
+    Severity.MEDIUM.value,
+)
+
+ALERT_SEVERITIES: tuple[str, ...] = (Severity.CRITICAL.value, Severity.HIGH.value)
+
+# severities the vulnerability scan runs
+SCANNABLE_SEVERITIES: tuple[str, ...] = (
+    Severity.CRITICAL.value,
+    Severity.HIGH.value,
+    Severity.MEDIUM.value,
+    Severity.LOW.value,
+)
+
+DEFAULT_SEVERITIES: list[str] = list(SCANNABLE_SEVERITIES)
+
+
+def severity_rank(value: str | None) -> int:
+    return SEVERITY_RANK.get(
+        (value or "").lower(), SEVERITY_RANK[Severity.UNKNOWN.value]
+    )
+
+
+def coerce_severity(value: str | None) -> str:
+    key = (value or "").strip().lower()
+    return key if key in SEVERITY_RANK else Severity.UNKNOWN.value
+
+
+class VulnState(StrEnum):
+    OPEN = "open"
+    CONFIRMED = "confirmed"
+    FALSE_POSITIVE = "false_positive"
+    ACCEPTED = "accepted"
+
+
+VULN_STATES: tuple[str, ...] = tuple(s.value for s in VulnState)
+
+VULN_STATE_LABELS: dict[str, str] = {
+    VulnState.OPEN.value: "Open",
+    VulnState.CONFIRMED.value: "Confirmed",
+    VulnState.FALSE_POSITIVE.value: "False positive",
+    VulnState.ACCEPTED.value: "Risk accepted",
+}
+
+VULN_STATE_HELP: dict[str, str] = {
+    VulnState.OPEN.value: "Not reviewed.",
+    VulnState.CONFIRMED.value: "Reviewed and reproduced.",
+    VulnState.FALSE_POSITIVE.value: "Reviewed and rejected. Suppressed on later scans of this target.",
+    VulnState.ACCEPTED.value: "Reviewed and accepted. Not alerted.",
+}
+
+SUPPRESSED_STATES: tuple[str, ...] = (
+    VulnState.FALSE_POSITIVE.value,
+    VulnState.ACCEPTED.value,
+)
+
+
+class CorroborationBasis(StrEnum):
+    CVE = "cve"
+    CWE = "cwe"
+
+
+CORROBORATION_BASIS_LABELS: dict[str, str] = {
+    CorroborationBasis.CVE.value: "Names the same CVE",
+    CorroborationBasis.CWE.value: "Names the same weakness class",
+}
+
+
+class Scanner(StrEnum):
+    NUCLEI = "nuclei"
+    DALFOX = "dalfox"
+    RENGINE = "rengine"
+    MANUAL = "manual"
+
+
+SCANNER_LABELS: dict[str, str] = {
+    Scanner.NUCLEI.value: "Nuclei",
+    Scanner.DALFOX.value: "Dalfox",
+    Scanner.RENGINE.value: "reNgine",
+    Scanner.MANUAL.value: "Manual testing",
+}
+
+DEFAULT_SCANNERS: list[str] = [Scanner.NUCLEI.value]
+
+# scanners the census stage can run (dalfox is a fuzzer, it lives in dast_scan)
+CENSUS_SCANNERS: tuple[str, ...] = (Scanner.NUCLEI.value,)
+CENSUS_SCANNER_LABELS: dict[str, str] = {k: SCANNER_LABELS[k] for k in CENSUS_SCANNERS}
+
+
+class Protocol(StrEnum):
+    HTTP = "http"
+    NETWORK = "network"
+    DNS = "dns"
+    SSL = "ssl"
+    FILE = "file"
+    HEADLESS = "headless"
+    JAVASCRIPT = "javascript"
+    WEBSOCKET = "websocket"
+    WHOIS = "whois"
+    OTHER = "other"
+
+
+PROTOCOLS: tuple[str, ...] = tuple(p.value for p in Protocol)
+
+PROTOCOL_LABELS: dict[str, str] = {
+    Protocol.HTTP.value: "HTTP",
+    Protocol.NETWORK.value: "Network",
+    Protocol.DNS.value: "DNS",
+    Protocol.SSL.value: "TLS",
+    Protocol.FILE.value: "File",
+    Protocol.HEADLESS.value: "Browser",
+    Protocol.JAVASCRIPT.value: "JavaScript",
+    Protocol.WEBSOCKET.value: "WebSocket",
+    Protocol.WHOIS.value: "WHOIS",
+    Protocol.OTHER.value: "Other",
+}
+
+
+def coerce_protocol(value: str | None) -> str:
+    key = (value or "").strip().lower()
+    return key if key in PROTOCOL_LABELS else Protocol.OTHER.value
+
+
+class TemplateOrigin(StrEnum):
+    OFFICIAL = "official"
+    CUSTOM = "custom"
+
+
+TEMPLATE_ORIGIN_LABELS: dict[str, str] = {
+    TemplateOrigin.OFFICIAL.value: "Default checks",
+    TemplateOrigin.CUSTOM.value: "Custom checks",
+}
+
+
+class Surface(StrEnum):
+    WEB = "web"
+    SERVICES = "services"
+    FULL = "full"
+
+
+SURFACE_LABELS: dict[str, str] = {
+    Surface.WEB.value: "Web assets",
+    Surface.SERVICES.value: "Web assets and network services",
+    Surface.FULL.value: "Everything, including hostnames",
+}
+
+
+class CoverageStatus(StrEnum):
+    COMPLETED = "completed"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+COVERAGE_STATUS_LABELS: dict[str, str] = {
+    CoverageStatus.COMPLETED.value: "Completed",
+    CoverageStatus.PARTIAL.value: "Partial",
+    CoverageStatus.FAILED.value: "Failed",
+    CoverageStatus.SKIPPED.value: "Not run",
+}
+
+
+@dataclass(frozen=True)
+class TemplateSet:
+    key: str
+    label: str
+    description: str
+    tags: tuple[str, ...] = ()
+    dirs: tuple[str, ...] = ()
+    default: bool = False
+    headless: bool = False
+
+
+TEMPLATE_SETS: tuple[TemplateSet, ...] = (
+    TemplateSet(
+        key="kev",
+        label="Known exploited",
+        description="Weaknesses with confirmed exploitation in the wild.",
+        tags=("kev",),
+        default=True,
+    ),
+    TemplateSet(
+        key="cve",
+        label="Published CVEs",
+        description="Checks tied to a published vulnerability identifier.",
+        tags=("cve",),
+        default=True,
+    ),
+    TemplateSet(
+        key="panel",
+        label="Exposed panels",
+        description="Administrative and management interfaces.",
+        tags=("panel", "login"),
+        default=True,
+    ),
+    TemplateSet(
+        key="exposure",
+        label="Exposed data",
+        description="Source, backups, credentials and configuration served to the internet.",
+        tags=("exposure", "files", "config", "backup", "disclosure"),
+        dirs=("http/exposures",),
+        default=True,
+    ),
+    TemplateSet(
+        key="misconfiguration",
+        label="Misconfiguration",
+        description="Misconfigured services.",
+        tags=("misconfig", "unauth", "auth-bypass"),
+        default=True,
+    ),
+    TemplateSet(
+        key="default-login",
+        label="Default credentials",
+        description="Default credentials accepted.",
+        tags=("default-login",),
+        default=True,
+    ),
+    TemplateSet(
+        key="takeover",
+        label="Subdomain takeover",
+        description="Hostnames pointing at claimable third-party infrastructure.",
+        tags=("takeover",),
+        default=True,
+    ),
+    TemplateSet(
+        key="injection",
+        label="Injection",
+        description="Untrusted input reaching an interpreter: SQL, template, command or path.",
+        tags=(
+            "sqli",
+            "xss",
+            "ssti",
+            "rce",
+            "lfi",
+            "ssrf",
+            "xxe",
+            "injection",
+            "traversal",
+        ),
+        default=True,
+    ),
+    TemplateSet(
+        key="cloud",
+        label="Cloud storage",
+        description="Buckets, blobs and cloud metadata reachable from outside the account.",
+        tags=("aws", "azure", "gcp", "s3", "bucket", "storage"),
+        dirs=("cloud",),
+    ),
+    TemplateSet(
+        key="network",
+        label="Network services",
+        description="Checks that speak a protocol other than HTTP.",
+        dirs=("network",),
+    ),
+    TemplateSet(
+        key="ssl",
+        label="TLS and certificates",
+        description="Transport security defects on the certificate or the negotiation.",
+        dirs=("ssl",),
+    ),
+    TemplateSet(
+        key="dns",
+        label="DNS hygiene",
+        description="Record-level defects: dangling names, zone transfer, mail policy.",
+        dirs=("dns",),
+    ),
+    TemplateSet(
+        key="headless",
+        label="Browser checks",
+        description="Checks that need a rendered page. Runs only with a browser enabled.",
+        dirs=("headless",),
+        headless=True,
+    ),
+)
+
+TEMPLATE_SET_KEYS: tuple[str, ...] = tuple(s.key for s in TEMPLATE_SETS)
+TEMPLATE_SET_BY_KEY: dict[str, TemplateSet] = {s.key: s for s in TEMPLATE_SETS}
+DEFAULT_TEMPLATE_SETS: list[str] = [s.key for s in TEMPLATE_SETS if s.default]
+HEADLESS_SETS: frozenset[str] = frozenset(s.key for s in TEMPLATE_SETS if s.headless)
+
+
+# retired check sets
+RETIRED_TEMPLATE_SETS: frozenset[str] = frozenset({"technology"})
+
+
+def reject_unknown(values: list[str], known, axis: str) -> list[str]:
+    """Reject values outside the known set."""
+    unknown = [v for v in values if v not in known]
+    if unknown:
+        msg = f"Unknown {axis}: {', '.join(sorted(unknown))}. Choose from: {', '.join(known)}."
+        raise ValueError(msg)
+    return values
+
+
+def scannable_severities(values: list[str]) -> list[str]:
+    """Known severities, minus the ones the vulnerability scan never runs."""
+    reject_unknown(values, SEVERITY_ORDER, "severity")
+    return [v for v in values if v in SCANNABLE_SEVERITIES]
+
+
+def live_template_sets(values: list[str]) -> list[str]:
+    """Known check sets, minus the retired ones."""
+    reject_unknown(values, (*TEMPLATE_SET_KEYS, *RETIRED_TEMPLATE_SETS), "check set")
+    return [v for v in values if v in TEMPLATE_SET_KEYS]
+
+
+FORBIDDEN_TEMPLATE_KEYS: frozenset[str] = frozenset({"code"})
+
+# ---------- what nuclei will not run ----------
+
+DAST_ROOT = "dast/"
+
+# .nuclei-ignore
+EXCLUDED_TAGS: frozenset[str] = frozenset(
+    {"dos", "local", "fuzz", "bruteforce", "txt-service"}
+)
+WEAK_MATCHER_PATHS: frozenset[str] = frozenset(
+    {
+        "http/cves/2019/CVE-2019-14696.yaml",
+        "http/cves/2021/CVE-2021-28164.yaml",
+        "http/fuzzing/wordpress-themes-detect.yaml",
+        "http/fuzzing/mdb-database-file.yaml",
+        "http/fuzzing/iis-shortname.yaml",
+        "dns/soa-detect.yaml",
+        "javascript/enumeration/pop3/pop3-capabilities-enum.yaml",
+        "javascript/enumeration/redis/redis-require-auth.yaml",
+        "dast/vulnerabilities/sqli/time-based-sqli.yaml",
+        "javascript/enumeration/minecraft-enum.yaml",
+        "http/miscellaneous/crypto-address-detect.yaml",
+        "http/vulnerabilities/wp-functions-php-disclosure.yaml",
+        "dns/acme-challenge-detect.yaml",
+        "aaaa-fingerprint.yaml",
+    }
+)
+
+KEV_TAG = "kev"
+VKEV_TAG = "vkev"
+
+EPSS_HIGH = 0.5
+CVSS_HIGH = 7.0
+
+
+def is_kev(tags: list[str] | tuple[str, ...] | None) -> bool:
+    return KEV_TAG in {t.lower() for t in tags or ()}
+
+
+def is_vkev(tags: list[str] | tuple[str, ...] | None) -> bool:
+    return VKEV_TAG in {t.lower() for t in tags or ()}

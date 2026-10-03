@@ -1,0 +1,503 @@
+from datetime import datetime
+from typing import Annotated
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, Query, status
+from fastapi.responses import PlainTextResponse
+from fastapi_pagination.ext.sqlalchemy import paginate
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import CurrentUser
+from app.api.pagination import Page
+from app.core.database import get_session
+from app.services.rescan import RescanService, rescan_schema
+from app.services.scan import (
+    MAX_DAILY_WINDOW,
+    MAX_TREND_TARGETS,
+    ScanService,
+    ScanSortDir,
+    ScanSortKey,
+)
+from app.services.scan_compare import ScanCompareService
+from shared.definitions.compare import (
+    DEFAULT_ROWS_PER_PAGE,
+    MAX_ROWS_PER_PAGE,
+    VERB_ORDER,
+    ChangeVerb,
+)
+from shared.definitions.vulnerabilities import Severity
+from shared.enums.scan import ScanStatus
+from shared.models.compare import ChangeRows, ComparableRun, ScanComparison
+from shared.models.recheck import RecheckRead
+from shared.models.scan import (
+    FocusedRunRead,
+    RescanCreate,
+    RescanSchema,
+    RunPreview,
+    ScanBatchCreate,
+    ScanCancelAll,
+    ScanChanges,
+    ScanCreate,
+    ScanDay,
+    ScanExportRow,
+    ScanRead,
+    ScanStats,
+    ScanTargetTrend,
+)
+from shared.models.scan_activity import ScanActivityRead
+from shared.models.scan_command import ScanCommandDetail, ScanCommandRead
+from shared.models.scan_preview import ScanPreview
+
+router = APIRouter(
+    prefix="/scans",
+    tags=["scans"],
+)
+
+
+def get_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> ScanService:
+    return ScanService(session)
+
+
+def get_rescan_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> RescanService:
+    return RescanService(session)
+
+
+def get_compare_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> ScanCompareService:
+    return ScanCompareService(session)
+
+
+@router.get("/rescan/schema", response_model=RescanSchema)
+async def rescan_vocabulary(_current_user: CurrentUser):
+    return rescan_schema()
+
+
+@router.post(
+    "/rescan", response_model=FocusedRunRead, status_code=status.HTTP_201_CREATED
+)
+async def rescan_assets(
+    data: RescanCreate,
+    current_user: CurrentUser,
+    service: Annotated[RescanService, Depends(get_rescan_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+):
+    return await service.create(
+        data=data, project_id=project_id, created_by=current_user.id
+    )
+
+
+@router.post("/rescan/preview", response_model=RunPreview)
+async def rescan_preview(
+    data: RescanCreate,
+    _current_user: CurrentUser,
+    service: Annotated[RescanService, Depends(get_rescan_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+):
+    return await service.preview(data=data, project_id=project_id)
+
+
+@router.get("/{scan_id}/rechecks", response_model=list[RecheckRead])
+async def scan_rechecks(
+    scan_id: UUID,
+    _current_user: CurrentUser,
+    service: Annotated[RescanService, Depends(get_rescan_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+):
+    return await service.rechecks(parent_scan_id=scan_id, project_id=project_id)
+
+
+@router.post("/preview", response_model=ScanPreview)
+async def preview_scan(
+    data: ScanCreate,
+    _current_user: CurrentUser,
+    service: Annotated[ScanService, Depends(get_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+):
+    return await service.preview(data=data, project_id=project_id)
+
+
+@router.post("", response_model=ScanRead, status_code=status.HTTP_201_CREATED)
+async def create_scan(
+    data: ScanCreate,
+    current_user: CurrentUser,
+    service: Annotated[ScanService, Depends(get_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+):
+    return await service.create(
+        data=data, project_id=project_id, created_by=current_user.id
+    )
+
+
+@router.post(
+    "/batch", response_model=list[ScanRead], status_code=status.HTTP_201_CREATED
+)
+async def create_scans(
+    data: ScanBatchCreate,
+    current_user: CurrentUser,
+    service: Annotated[ScanService, Depends(get_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+):
+    return await service.create_batch(
+        data=data, project_id=project_id, created_by=current_user.id
+    )
+
+
+@router.get("", response_model=Page[ScanRead])
+async def list_scans(
+    _current_user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    service: Annotated[ScanService, Depends(get_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+    target_id: Annotated[UUID | None, Query(description="Filter by target ID")] = None,
+    status: Annotated[
+        list[ScanStatus] | None, Query(description="Filter by status")
+    ] = None,
+    engine: Annotated[
+        list[str] | None, Query(description="Filter by engine name")
+    ] = None,
+    context: Annotated[
+        list[str] | None, Query(description="Filter by context name")
+    ] = None,
+    search: Annotated[
+        str | None, Query(description="Search target, engine or context")
+    ] = None,
+    time_range: Annotated[
+        str | None, Query(description="Time window: 24h, 7d, 30d")
+    ] = None,
+    sort_by: Annotated[ScanSortKey, Query(description="Sort field")] = "started",
+    sort_dir: Annotated[ScanSortDir, Query(description="Sort direction")] = "desc",
+    scheduled: Annotated[
+        bool | None, Query(description="Scheduled only, or manual only")
+    ] = None,
+    include_focused: Annotated[
+        bool, Query(description="Include focused rescans")
+    ] = False,
+    parent_id: Annotated[UUID | None, Query(description="Rescans of this scan")] = None,
+    new_checks: Annotated[
+        bool | None, Query(description="New checks runs only, or none of them")
+    ] = None,
+    severity: Annotated[
+        list[Severity] | None, Query(description="Runs with open findings of these")
+    ] = None,
+    short: Annotated[
+        bool | None, Query(description="Runs with a partial or failed stage, or none")
+    ] = None,
+    added: Annotated[
+        bool | None, Query(description="Runs that found web assets new to the target")
+    ] = None,
+    started_from: Annotated[
+        datetime | None, Query(description="Started at or after")
+    ] = None,
+    started_to: Annotated[datetime | None, Query(description="Started before")] = None,
+    latest: Annotated[
+        bool, Query(description="The newest matching run of each target")
+    ] = False,
+):
+    if added is not None:
+        await service.prepare_growth(project_id, target_id)
+    query = service.build_list_query(
+        project_id=project_id,
+        target_id=target_id,
+        parent_id=parent_id,
+        statuses=[s.value for s in status] if status else None,
+        engines=engine,
+        contexts=context,
+        search=search,
+        time_range=time_range,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        scheduled=scheduled,
+        include_focused=include_focused,
+        new_checks=new_checks,
+        severities=[s.value for s in severity] if severity else None,
+        short=short,
+        added=added,
+        started_from=started_from,
+        started_to=started_to,
+        latest=latest,
+    )
+    page = await paginate(
+        session,
+        query,
+        transformer=lambda items: [service.to_read(s) for s in items],
+    )
+    await service.attach_deltas(page.items)
+    if latest:
+        await service.attach_target_runs(page.items, include_focused)
+    return page
+
+
+@router.get("/latest", response_model=list[ScanRead])
+async def latest_runs(
+    _current_user: CurrentUser,
+    service: Annotated[ScanService, Depends(get_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+    target_id: Annotated[
+        list[UUID], Query(description="Targets", max_length=MAX_TREND_TARGETS)
+    ],
+):
+    return await service.latest_for_targets(project_id, target_id)
+
+
+@router.get("/trends", response_model=list[ScanTargetTrend])
+async def finding_trends(
+    _current_user: CurrentUser,
+    service: Annotated[ScanService, Depends(get_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+    target_id: Annotated[
+        list[UUID], Query(description="Targets", max_length=MAX_TREND_TARGETS)
+    ],
+):
+    return await service.finding_trends(project_id, target_id)
+
+
+@router.get("/daily", response_model=list[ScanDay])
+async def daily_runs(
+    _current_user: CurrentUser,
+    service: Annotated[ScanService, Depends(get_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+    days: Annotated[int, Query(ge=1, le=MAX_DAILY_WINDOW)] = 30,
+    target_id: Annotated[UUID | None, Query(description="Filter by target ID")] = None,
+    include_focused: Annotated[bool, Query()] = False,
+):
+    return await service.daily(project_id, days, target_id, include_focused)
+
+
+@router.get("/stats", response_model=ScanStats)
+async def scan_stats(
+    _current_user: CurrentUser,
+    service: Annotated[ScanService, Depends(get_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+    target_id: Annotated[UUID | None, Query(description="Filter by target ID")] = None,
+    include_focused: Annotated[
+        bool, Query(description="Include focused rescans")
+    ] = False,
+):
+    return await service.stats(
+        project_id=project_id, target_id=target_id, include_focused=include_focused
+    )
+
+
+@router.get("/changes", response_model=ScanChanges)
+async def scan_changes(
+    _current_user: CurrentUser,
+    service: Annotated[ScanService, Depends(get_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+    window: Annotated[str, Query(description="Window: 24h, 7d, 30d")] = "7d",
+    target_id: Annotated[UUID | None, Query(description="Filter by target ID")] = None,
+):
+    return await service.changes(
+        project_id=project_id, window=window, target_id=target_id
+    )
+
+
+@router.get("/export", response_model=list[ScanExportRow])
+async def export_scans(
+    _current_user: CurrentUser,
+    service: Annotated[ScanService, Depends(get_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+    target_id: Annotated[UUID | None, Query(description="Filter by target ID")] = None,
+    status: Annotated[list[ScanStatus] | None, Query()] = None,
+    engine: Annotated[list[str] | None, Query()] = None,
+    context: Annotated[list[str] | None, Query()] = None,
+    search: Annotated[str | None, Query()] = None,
+    time_range: Annotated[str | None, Query()] = None,
+    sort_by: Annotated[ScanSortKey, Query()] = "started",
+    sort_dir: Annotated[ScanSortDir, Query()] = "desc",
+    scheduled: Annotated[bool | None, Query()] = None,
+    include_focused: Annotated[bool, Query()] = False,
+    new_checks: Annotated[bool | None, Query()] = None,
+):
+    return await service.export_rows(
+        project_id=project_id,
+        target_id=target_id,
+        statuses=[s.value for s in status] if status else None,
+        engines=engine,
+        contexts=context,
+        search=search,
+        time_range=time_range,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        scheduled=scheduled,
+        include_focused=include_focused,
+        new_checks=new_checks,
+    )
+
+
+@router.get("/compare", response_model=ScanComparison)
+async def compare_scans(
+    _current_user: CurrentUser,
+    service: Annotated[ScanCompareService, Depends(get_compare_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+    current: Annotated[UUID, Query(description="Later run")],
+    baseline: Annotated[
+        UUID | None, Query(description="Earlier run. Defaults to the previous run.")
+    ] = None,
+):
+    return await service.comparison(
+        baseline_id=baseline, current_id=current, project_id=project_id
+    )
+
+
+@router.get("/compare/rows", response_model=ChangeRows)
+async def compare_scan_rows(
+    _current_user: CurrentUser,
+    service: Annotated[ScanCompareService, Depends(get_compare_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+    current: Annotated[UUID, Query(description="Later run")],
+    dimension: Annotated[str, Query(description="Result dimension")],
+    baseline: Annotated[
+        UUID | None, Query(description="Earlier run. Defaults to the previous run.")
+    ] = None,
+    verb: Annotated[
+        list[ChangeVerb] | None,
+        Query(description=f"Any of: {', '.join(VERB_ORDER)}. Omit for every change."),
+    ] = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    size: Annotated[int, Query(ge=1, le=MAX_ROWS_PER_PAGE)] = DEFAULT_ROWS_PER_PAGE,
+):
+    return await service.rows(
+        baseline_id=baseline,
+        current_id=current,
+        project_id=project_id,
+        dimension=dimension,
+        verbs=[v.value for v in verb or []],
+        page=page,
+        size=size,
+    )
+
+
+@router.get("/compare/diff", response_class=PlainTextResponse)
+async def compare_scan_diff(
+    _current_user: CurrentUser,
+    service: Annotated[ScanCompareService, Depends(get_compare_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+    current: Annotated[UUID, Query(description="Later run")],
+    baseline: Annotated[
+        UUID | None, Query(description="Earlier run. Defaults to the previous run.")
+    ] = None,
+    dimension: Annotated[
+        str | None, Query(description="Result dimension. Omit for every dimension.")
+    ] = None,
+    verb: Annotated[list[ChangeVerb] | None, Query()] = None,
+):
+    return await service.diff(
+        baseline_id=baseline,
+        current_id=current,
+        project_id=project_id,
+        dimension=dimension,
+        verbs=[v.value for v in verb or []],
+    )
+
+
+@router.post("/cancel-all", response_model=ScanCancelAll)
+async def cancel_all_scans(
+    _current_user: CurrentUser,
+    service: Annotated[ScanService, Depends(get_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+    target_id: Annotated[UUID | None, Query(description="Target ID")] = None,
+):
+    return await service.cancel_all(project_id=project_id, target_id=target_id)
+
+
+@router.get("/{id}/comparable", response_model=list[ComparableRun])
+async def comparable_runs(
+    id: UUID,
+    _current_user: CurrentUser,
+    service: Annotated[ScanCompareService, Depends(get_compare_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+):
+    return await service.comparable(scan_id=id, project_id=project_id)
+
+
+@router.get("/{id}", response_model=ScanRead)
+async def get_scan(
+    id: UUID,
+    _current_user: CurrentUser,
+    service: Annotated[ScanService, Depends(get_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+):
+    return await service.get(id=id, project_id=project_id)
+
+
+@router.get("/{id}/activities", response_model=list[ScanActivityRead])
+async def list_scan_activities(
+    id: UUID,
+    _current_user: CurrentUser,
+    service: Annotated[ScanService, Depends(get_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+):
+    return await service.list_activities(scan_id=id, project_id=project_id)
+
+
+@router.get("/{id}/commands", response_model=list[ScanCommandRead])
+async def list_scan_commands(
+    id: UUID,
+    _current_user: CurrentUser,
+    service: Annotated[ScanService, Depends(get_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+    activity_id: Annotated[
+        UUID | None, Query(description="Filter by stage activity ID")
+    ] = None,
+):
+    return await service.list_commands(
+        scan_id=id, project_id=project_id, activity_id=activity_id
+    )
+
+
+@router.get("/{id}/commands/{command_id}", response_model=ScanCommandDetail)
+async def get_scan_command(
+    id: UUID,
+    command_id: UUID,
+    _current_user: CurrentUser,
+    service: Annotated[ScanService, Depends(get_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+):
+    return await service.get_command(
+        scan_id=id, command_id=command_id, project_id=project_id
+    )
+
+
+@router.post("/{id}/cancel", response_model=ScanRead)
+async def cancel_scan(
+    id: UUID,
+    _current_user: CurrentUser,
+    service: Annotated[ScanService, Depends(get_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+):
+    return await service.cancel(id=id, project_id=project_id)
+
+
+@router.post("/{id}/pause", response_model=ScanRead)
+async def pause_scan(
+    id: UUID,
+    _current_user: CurrentUser,
+    service: Annotated[ScanService, Depends(get_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+):
+    return await service.pause(id=id, project_id=project_id)
+
+
+@router.post("/{id}/resume", response_model=ScanRead)
+async def resume_scan(
+    id: UUID,
+    _current_user: CurrentUser,
+    service: Annotated[ScanService, Depends(get_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+):
+    return await service.resume(id=id, project_id=project_id)
+
+
+@router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_scan(
+    id: UUID,
+    _current_user: CurrentUser,
+    service: Annotated[ScanService, Depends(get_service)],
+    project_id: Annotated[UUID, Query(description="Project ID")],
+):
+    await service.delete(id=id, project_id=project_id)

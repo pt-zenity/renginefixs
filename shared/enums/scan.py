@@ -1,0 +1,107 @@
+from enum import Enum
+
+
+class ScanStatus(Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ScanScope(Enum):
+    FULL = "full"
+    FOCUSED = "focused"
+
+
+class ScanActivityStatus(Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    PAUSED = "paused"
+    SUCCESS = "success"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    ABORTED = "aborted"
+
+
+SCAN_LIVE_STATUSES = (ScanStatus.PENDING.value, ScanStatus.RUNNING.value)
+SCAN_OPEN_STATUSES = (*SCAN_LIVE_STATUSES, ScanStatus.PAUSED.value)
+SCAN_TERMINAL_STATUSES = (
+    ScanStatus.COMPLETED.value,
+    ScanStatus.FAILED.value,
+    ScanStatus.CANCELLED.value,
+)
+ACTIVITY_TERMINAL_STATUSES = (
+    ScanActivityStatus.SUCCESS.value,
+    ScanActivityStatus.PARTIAL.value,
+    ScanActivityStatus.FAILED.value,
+    ScanActivityStatus.SKIPPED.value,
+    ScanActivityStatus.ABORTED.value,
+)
+
+
+class Intensity(Enum):
+    PASSIVE = "passive"
+    NORMAL = "normal"
+    AGGRESSIVE = "aggressive"
+
+
+INTENSITIES = tuple(i.value for i in Intensity)
+
+
+class Phase(Enum):
+    DISCOVERY = "discovery"
+    EXPANSION = "expansion"
+    DEPTH = "depth"
+    FINALIZE = "finalize"
+
+
+PHASE_ORDER: dict[str, int] = {
+    Phase.DISCOVERY.value: 0,
+    Phase.EXPANSION.value: 1,
+    Phase.DEPTH.value: 2,
+    Phase.FINALIZE.value: 3,
+}
+
+
+class AssetKind(Enum):
+    HOSTS = "hosts"
+    ADDRESSES = "addresses"
+    PORTS = "ports"
+    HTTP_ASSETS = "http_assets"
+    ENDPOINTS = "endpoints"
+    VULNERABILITIES = "vulnerabilities"
+    SECRETS = "secrets"
+
+
+class StageRole(Enum):
+    CAPABILITY = "capability"
+    SUPPORT = "support"
+
+
+class StageGroup(Enum):
+    HOSTS = "hosts"
+    ADDRESSES = "addresses"
+    SERVICES = "services"
+    WEB = "web"
+    ENDPOINTS = "endpoints"
+    VULNERABILITIES = "vulnerabilities"
+    ANALYSIS = "analysis"
+
+
+class ScanEventKind(Enum):
+    SCAN_STARTED = "scan_started"
+    SCAN_COMPLETED = "scan_completed"
+    SCAN_FAILED = "scan_failed"
+    SCAN_CANCELLED = "scan_cancelled"
+    SCAN_PAUSED = "scan_paused"
+    SCAN_RESUMED = "scan_resumed"
+    STAGE_STARTED = "stage_started"
+    STAGE_PROGRESS = "stage_progress"
+    STAGE_COMPLETED = "stage_completed"
+    COMMAND_STARTED = "command_started"
+    COMMAND_FINISHED = "command_finished"
+    RESULTS_FOUND = "results_found"
+    INTEREST_READY = "interest_ready"
