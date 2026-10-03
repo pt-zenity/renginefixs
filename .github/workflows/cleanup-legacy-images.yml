@@ -1,0 +1,44 @@
+name: Remove legacy reNgine images
+on:
+  workflow_dispatch:
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare verified SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ vars.SSH_HOST }}
+          SSH_PORT: ${{ vars.SSH_PORT }}
+          SSH_HOST_FINGERPRINT: ${{ vars.SSH_HOST_FINGERPRINT }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST" > "$RUNNER_TEMP/host-key"
+          actual=$(ssh-keygen -lf "$RUNNER_TEMP/host-key" -E sha256 | awk '{print $2}')
+          test "$actual" = "$SSH_HOST_FINGERPRINT"
+          cat "$RUNNER_TEMP/host-key" >> ~/.ssh/known_hosts
+      - name: Remove stopped 2.x application images
+        env:
+          SSH_HOST: ${{ vars.SSH_HOST }}
+          SSH_USER: ${{ vars.SSH_USER }}
+          SSH_PORT: ${{ vars.SSH_PORT }}
+        run: |
+          ssh -o BatchMode=yes -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" 'bash -se' <<'REMOTE' | tee "$RUNNER_TEMP/cleanup.log"
+          set -Eeuo pipefail
+          test -z "$(sudo docker ps --filter label=com.docker.compose.project=rengine --format '{{.Names}}')"
+          curl -fsS --resolve 4sus.xyz:443:127.0.0.1 https://4sus.xyz/api/v1/health/health -o /dev/null
+          images=(rengine-celery:latest rengine-celery-beat:latest rengine-certs:latest docker.pkg.github.com/yogeshojha/rengine/rengine:latest)
+          for image in "${images[@]}"; do
+            if sudo docker image inspect "$image" >/dev/null 2>&1; then
+              sudo docker image rm "$image" </dev/null
+            fi
+          done
+          curl -fsS --resolve 4sus.xyz:443:127.0.0.1 https://4sus.xyz/api/v1/health/health -o /dev/null
+          echo IMAGES_CLEANED
+          REMOTE
+          grep -q '^IMAGES_CLEANED$' "$RUNNER_TEMP/cleanup.log"
