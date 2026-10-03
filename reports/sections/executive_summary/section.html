@@ -1,0 +1,40 @@
+{% import 'macros.html' as m with context %}
+{% if preamble %}<div class="md prose block">{{ preamble|md|safe }}</div>{% endif %}
+
+{% if posture and assessed %}
+<div class="verdict">
+  <div class="verdict__dial">{{ dial(posture.score, grade=posture.grade, label='Posture', arc=score_arc, palette=ctx.palette)|safe }}</div>
+  <div class="verdict__body">
+    <div class="verdict__headline">{{ headline }}</div>
+    <div class="verdict__sub">
+      {{ actionable|num }} actionable {{ actionable|plural('finding') }}{% if kev %} · {{ kev|num }} known exploited{% endif %} · assessed {{ ctx.data.observed_label }}
+    </div>
+    {% if severity %}{{ m.severity_tiles(severity, compact=true) }}{% endif %}
+  </div>
+</div>
+{% endif %}
+
+{% if kpis %}
+<div class="avoid block">
+  <div class="label block">Surface</div>
+  {{ m.strip(kpis) }}
+</div>
+{% endif %}
+
+<div class="prose md">{{ narrative|md|safe }}</div>
+{% if ai and disclose %}<p class="ai-note">This summary was written by a language model from the computed findings.</p>{% endif %}
+
+{% if deductions %}
+<div class="sub">
+  <div class="label block">Score deductions</div>
+  <table class="table table--tight">
+    <thead><tr><th>Condition</th><th class="num">Observed</th><th class="num">Points</th></tr></thead>
+    <tbody>
+      {% for row in deductions %}
+      <tr><td>{{ row.label }}</td><td class="num">{{ row.count|num }}</td><td class="num">-{{ row.points|round|int }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="micro faint" style="margin-top:1.4mm">The score starts at 100. Each condition deducts up to a fixed ceiling.</p>
+</div>
+{% endif %}

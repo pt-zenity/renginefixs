@@ -1,0 +1,215 @@
+import uuid
+from datetime import datetime
+from functools import partial
+
+from pydantic import BaseModel, field_validator
+from pydantic import Field as PydanticField
+from sqlalchemy import Column
+from sqlalchemy.types import JSON, Text
+from sqlmodel import Field, SQLModel
+
+from shared.definitions.intensity import clean_transport_overrides
+from shared.enums.scan import Intensity
+from shared.models.scan_context import ScanContextCreate
+from shared.utils.datetime import utc_now
+from shared.utils.validation import clean_name, clean_optional_name
+
+
+class ScanEngine(SQLModel, table=True):
+    __tablename__ = "scan_engines"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    project_id: uuid.UUID = Field(foreign_key="projects.id", index=True)
+    created_by: uuid.UUID = Field(foreign_key="users.id")
+    name: str = Field(max_length=200)
+    description: str | None = Field(default=None, max_length=1000)
+    intensity: str = Field(default=Intensity.NORMAL.value)
+    global_headers: list = Field(
+        default_factory=list, sa_column=Column(JSON, nullable=False)
+    )
+    stages: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    transport_overrides: dict = Field(
+        default_factory=dict, sa_column=Column(JSON, nullable=False)
+    )
+    yaml_source: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    tool_options: dict = Field(
+        default_factory=dict, sa_column=Column(JSON, nullable=False)
+    )
+    builtin: bool = Field(default=False)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    last_used_at: datetime | None = Field(default=None)
+
+
+class ScanEngineCreate(BaseModel):
+    name: str
+    description: str | None = None
+    intensity: str = Intensity.NORMAL.value
+    global_headers: list[str] = PydanticField(default_factory=list)
+    stages: dict[str, dict] = PydanticField(default_factory=dict)
+    transport_overrides: dict[str, dict] = PydanticField(default_factory=dict)
+    yaml_source: str | None = None
+    tool_options: dict[str, str] = PydanticField(default_factory=dict)
+
+    _validate_name = field_validator("name")(partial(clean_name, max_len=200))
+    _validate_transport = field_validator("transport_overrides")(
+        lambda cls, v: clean_transport_overrides(v)  # noqa: ARG005
+    )
+
+
+class ScanEngineUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    intensity: str | None = None
+    global_headers: list[str] | None = None
+    stages: dict[str, dict] | None = None
+    transport_overrides: dict[str, dict] | None = None
+    yaml_source: str | None = None
+    tool_options: dict[str, str] | None = None
+
+    _validate_name = field_validator("name")(partial(clean_optional_name, max_len=200))
+
+    @field_validator("transport_overrides")
+    @classmethod
+    def _validate_transport(cls, value):
+        return None if value is None else clean_transport_overrides(value)
+
+
+class EngineUsage(BaseModel):
+    schedules: int = 0
+    scans: int = 0
+
+
+class ScanEngineRead(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    created_by: uuid.UUID
+    name: str
+    description: str | None
+    intensity: str
+    global_headers: list[str]
+    stages: dict[str, dict]
+    transport_overrides: dict[str, dict] = PydanticField(default_factory=dict)
+    yaml_source: str | None
+    tool_options: dict[str, str] = PydanticField(default_factory=dict)
+    usage: EngineUsage = PydanticField(default_factory=EngineUsage)
+    builtin: bool = False
+    created_at: datetime
+    updated_at: datetime
+    last_used_at: datetime | None
+
+
+class StageField(BaseModel):
+    name: str
+    title: str
+    description: str | None = None
+    type: str
+    default: object = None
+    options: list[str] | None = None
+    option_labels: dict[str, str] | None = None
+    minimum: int | None = None
+    maximum: int | None = None
+    tier: str = "basic"
+    widget: str | None = None
+    kind: str | None = None
+    launch: bool = False
+    needs: str | None = None
+    unavailable_reason: str | None = None
+
+
+class StageTransport(BaseModel):
+    tool: str
+    rates: dict[str, int | None]
+    threads: dict[str, int]
+    timeout: int
+
+
+class StageCatalogEntry(BaseModel):
+    name: str
+    title: str
+    description: str
+    phase: str
+    level: int
+    applies_to: list[str]
+    tools: list[str]
+    api_keys: list[str]
+    requires_api_keys: bool = False
+    touches_target: bool = True
+    passive_capable: bool = False
+    always_on: bool = False
+    launch_fields: list[str] = PydanticField(default_factory=list)
+    group: str
+    role: str
+    consumes: list[str] = PydanticField(default_factory=list)
+    produces: list[str] = PydanticField(default_factory=list)
+    transport: StageTransport | None = None
+    check_of: str | None = None
+    finding_severities: list[str] = PydanticField(default_factory=list)
+    defaults: dict
+    fields: list[StageField] = PydanticField(default_factory=list)
+
+
+class StageGroupEntry(BaseModel):
+    key: str
+    label: str
+
+
+class ToolOption(BaseModel):
+    name: str
+    label: str
+    phase: str
+    example: str
+
+
+class EnginePreset(BaseModel):
+    name: str
+    title: str
+    description: str
+    intensity: str
+    stages: dict[str, dict]
+
+
+class EngineCatalog(BaseModel):
+    phases: list[str]
+    stages: list[StageCatalogEntry]
+    rate_tools: list[str]
+    tool_options: list[ToolOption]
+    presets: list[EnginePreset]
+    target_types: list[str]
+    groups: list[StageGroupEntry] = PydanticField(default_factory=list)
+    seed_produces: dict[str, list[str]] = PydanticField(default_factory=dict)
+
+
+class PreviewResolved(BaseModel):
+    header_names: list[str] = PydanticField(default_factory=list)
+    global_rate_limit_ceiling: int | None = None
+    per_tool_rate_limits: dict[str, int] = PydanticField(default_factory=dict)
+    preset_rates: dict[str, int] = PydanticField(default_factory=dict)
+    preset_threads: dict[str, int] = PydanticField(default_factory=dict)
+    excluded_subdomains: list[str] = PydanticField(default_factory=list)
+    excluded_paths: list[str] = PydanticField(default_factory=list)
+    excluded_ips: list[str] = PydanticField(default_factory=list)
+    included_subdomains: list[str] = PydanticField(default_factory=list)
+    follow_redirects: bool | None = None
+    http_protocol: str = "both"
+
+
+class EnginePreviewResult(BaseModel):
+    phases: list = PydanticField(default_factory=list)
+    resolved_stages: dict[str, dict] = PydanticField(default_factory=dict)
+    resolved: PreviewResolved = PydanticField(default_factory=PreviewResolved)
+    warnings: list[str] = PydanticField(default_factory=list)
+
+
+class EnginePreviewRequest(BaseModel):
+    target_type: str
+    context_id: uuid.UUID | None = None
+    context: ScanContextCreate | None = None
+    intensity: str = Intensity.NORMAL.value
+    stages: dict[str, dict] = PydanticField(default_factory=dict)
+    transport_overrides: dict[str, dict] = PydanticField(default_factory=dict)
+
+    @field_validator("transport_overrides")
+    @classmethod
+    def _validate_transport(cls, value):
+        return clean_transport_overrides(value)

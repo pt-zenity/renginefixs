@@ -1,189 +1,331 @@
+# every image that runs worker code mounts the same tree, so beat, the stream
+# and flower cannot drift from the worker
+x-worker-volumes: &worker-volumes
+  - ./worker/app:/app/app
+  - ./shared:/app/shared
+  - ./tools:/app/tools
+  - ./stages:/app/stages
+  - ./reports:/app/reports
+  - ./interest:/app/interest
+  - ./toolbox:/app/toolbox
+  - ./scan_media:/app/scan_media
+  - vuln_templates:/app/vuln-templates
+  - wordlists:/app/wordlists
+  - reports_out:/app/reports-out
+  - exports_out:/app/exports-out
+  - report_fonts:/app/report-fonts
+  # the editable installs the image built; a host mount must not shadow them
+  - /app/shared/build
+  - /app/shared/rengine_shared.egg-info
+  - /app/tools/build
+  - /app/tools/rengine_tools.egg-info
+
 services:
   db:
-    restart: always
-    image: "postgres:12.3-alpine"
-    environment:
-      - POSTGRES_DB=${POSTGRES_DB}
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_PORT=${POSTGRES_PORT}
-    ports:
-      - "127.0.0.1:5432:5432"
+    image: postgres:16-alpine
+    shm_size: ${POSTGRES_SHM_SIZE:-1gb}
+    env_file:
+      - .env
     volumes:
-      - postgres_data:/var/lib/postgresql/data/
-    networks:
-      - rengine_network
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:5432:5432"
+    command: >
+      postgres
+      -c shared_buffers=${POSTGRES_SHARED_BUFFERS:-2GB}
+      -c effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-6GB}
+      -c work_mem=${POSTGRES_WORK_MEM:-32MB}
+      -c maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-512MB}
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c max_parallel_workers_per_gather=4
+      -c jit=off
+      -c max_connections=${POSTGRES_MAX_CONNECTIONS:-250}
+      -c shared_preload_libraries=pg_stat_statements
+      -c pg_stat_statements.max=5000
+      -c pg_stat_statements.track=top
+      -c track_io_timing=on
+      -c log_min_duration_statement=${POSTGRES_LOG_MIN_DURATION:-2000}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-rengine}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   redis:
-    restart: always
-    image: "redis:alpine"
-    hostname: redis
-    networks:
-      - rengine_network
+    image: redis:8-alpine
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:6379:6379"
+    volumes:
+      - redis_data:/data
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "redis-cli $${REDIS_PASSWORD:+-a \"$$REDIS_PASSWORD\"} --no-auth-warning ping | grep -q PONG",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory ${REDIS_MAXMEMORY:-1gb}
+      --maxmemory-policy noeviction
+      ${REDIS_PASSWORD:+--requirepass} ${REDIS_PASSWORD:-}
 
-  celery:
+  api:
+    image: rengine-api:latest
     build:
-      context: ./web
-    restart: always
-    entrypoint: /usr/src/app/celery-entrypoint.sh
-    # command: celery -A reNgine worker --autoscale=${MAX_CONCURRENCY},${MIN_CONCURRENCY} -l INFO
+      context: .
+      dockerfile: api/Dockerfile
+      target: development
     volumes:
-      - ./web:/usr/src/app
-      - github_repos:/usr/src/github
-      - wordlist:/usr/src/wordlist
-      - scan_results:/usr/src/scan_results
-      - gf_patterns:/root/.gf
-      - nuclei_templates:/root/nuclei-templates
-      - tool_config:/root/.config
-      - static_volume:/usr/src/app/staticfiles/
+      - ./api/app:/app/app
+      - ./shared:/app/shared
+      - ./tools:/app/tools
+      - ./stages:/app/stages
+      - ./reports:/app/reports
+      - ./interest:/app/interest
+      - ./mcp:/app/mcp
+      - ./channels:/app/channels
+      - ./connectors:/app/connectors
+      - ./toolbox:/app/toolbox
+      - ./binaries:/app/binaries:ro
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - ./tests:/app/tests
+      - ./pyproject.toml:/app/pyproject.toml
+      # read-only, so the tests can check a frontend mirror has not drifted
+      - ./frontend/src/lib/config:/app/frontend-config:ro
+      - ./scan_media:/app/scan_media
+      - vuln_templates:/app/vuln-templates
+      - wordlists:/app/wordlists
+      - reports_out:/app/reports-out
+      - exports_out:/app/exports-out
+      - report_fonts:/app/report-fonts
+      - /app/shared/build
+      - /app/shared/rengine_shared.egg-info
+      - /app/tools/build
+      - /app/tools/rengine_tools.egg-info
+    ports:
+      - "${APP_BIND_ADDR:-0.0.0.0}:8000:8000"
+    env_file:
+      - .env
     environment:
-      - DEBUG=0
-      - CELERY_BROKER=redis://redis:6379/0
-      - CELERY_BACKEND=redis://redis:6379/0
-      - DOMAIN_NAME=${DOMAIN_NAME}
-      - POSTGRES_DB=${POSTGRES_DB}
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_PORT=${POSTGRES_PORT}
-      - POSTGRES_HOST=${POSTGRES_HOST}
-      - MAX_CONCURRENCY=${MAX_CONCURRENCY}
-      - MIN_CONCURRENCY=${MIN_CONCURRENCY}
+      - WATCHFILES_FORCE_POLLING=true
     depends_on:
-      - db
-      - redis
-    networks:
-      - rengine_network
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
-  celery-beat:
-    build: ./web
-    entrypoint: /usr/src/app/beat-entrypoint.sh
-    command: celery -A reNgine beat -l INFO --scheduler django_celery_beat.schedulers:DatabaseScheduler
-    environment:
-      - CELERY_BROKER=redis://redis:6379/0
-      - CELERY_BACKEND=redis://redis:6379/0
-      - POSTGRES_DB=${POSTGRES_DB}
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_PORT=${POSTGRES_PORT}
-      - POSTGRES_HOST=${POSTGRES_HOST}
-    depends_on:
-      - celery
-      - db
-    volumes:
-      - ./web:/usr/src/app
-      - github_repos:/usr/src/github
-      - wordlist:/usr/src/wordlist
-      - scan_results:/usr/src/scan_results
-      - gf_patterns:/root/.gf
-      - nuclei_templates:/root/nuclei-templates
-      - tool_config:/root/.config
-    networks:
-      - rengine_network
-
-  web:
+  # background jobs and toolbox runs
+  worker-default:
+    init: true
+    image: rengine-worker:latest
     build:
-      context: ./web
-    entrypoint: /usr/src/app/entrypoint.sh
-    restart: always
-    image: docker.pkg.github.com/yogeshojha/rengine/rengine:latest
+      context: .
+      dockerfile: worker/Dockerfile
+      target: development
+    volumes: *worker-volumes
+    env_file:
+      - .env
+    command: >
+      uv run celery -A app.celery worker
+      --loglevel=DEBUG
+      --concurrency=${CELERY_DEFAULT_CONCURRENCY:-4}
+      --queues=critical,default
+      --hostname=worker-default@%h
+      --max-tasks-per-child=100
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "/app/.venv/bin/celery -A app.celery inspect ping -d worker-default@$$HOSTNAME || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # scan stages, one slot per running stage; scale with --scale worker-scans=N
+  worker-scans:
+    init: true
+    # built by worker-default
+    image: rengine-worker:latest
+    shm_size: 512m
+    volumes: *worker-volumes
+    env_file:
+      - .env
+    command: >
+      uv run celery -A app.celery worker
+      --loglevel=DEBUG
+      --concurrency=${CELERY_SCAN_CONCURRENCY:-16}
+      --queues=scans
+      --hostname=worker-scans@%h
+      --max-tasks-per-child=100
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "/app/.venv/bin/celery -A app.celery inspect ping -d worker-scans@$$HOSTNAME || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # scan launch, step hand-over, resume and finalize
+  worker-control:
+    init: true
+    # built by worker-default
+    image: rengine-worker:latest
+    volumes: *worker-volumes
+    env_file:
+      - .env
+    command: >
+      uv run celery -A app.celery worker
+      --loglevel=DEBUG
+      --concurrency=${CELERY_CONTROL_CONCURRENCY:-8}
+      --queues=scan_control
+      --hostname=worker-control@%h
+      --max-tasks-per-child=100
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "/app/.venv/bin/celery -A app.celery inspect ping -d worker-control@$$HOSTNAME || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # beat scheduler: emits the schedule tick that fires due scan schedules
+  worker-beat:
+    init: true
+    # built by worker-default
+    image: rengine-worker:latest
+    volumes: *worker-volumes
+    env_file:
+      - .env
+    command: >
+      uv run celery -A app.celery beat
+      --loglevel=INFO
+      --schedule=/tmp/celerybeat-schedule
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # certificate transparency stream for watched programs
+  ct-stream:
+    init: true
+    # built by worker-default
+    image: rengine-worker:latest
+    volumes:
+      - ./worker/app:/app/app
+      - ./shared:/app/shared
+      - ./tools:/app/tools
+      - ./stages:/app/stages
+      - ./reports:/app/reports
+      - ./interest:/app/interest
+      - ./toolbox:/app/toolbox
+      - ct_state:/app/ct-state
+      - /app/shared/build
+      - /app/shared/rengine_shared.egg-info
+      - /app/tools/build
+      - /app/tools/rengine_tools.egg-info
+    env_file:
+      - .env
+    command: uv run python -m app.ct_stream
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # remote control: long-polls every chat channel that is switched on
+  channels:
+    init: true
+    # built by api
+    image: rengine-api:latest
+    volumes:
+      - ./api/app:/app/app
+      - ./shared:/app/shared
+      - ./tools:/app/tools
+      - ./stages:/app/stages
+      - ./reports:/app/reports
+      - ./interest:/app/interest
+      - ./mcp:/app/mcp
+      - ./channels:/app/channels
+      - ./connectors:/app/connectors
+      - ./toolbox:/app/toolbox
+      - /app/shared/build
+      - /app/shared/rengine_shared.egg-info
+      - /app/tools/build
+      - /app/tools/rengine_tools.egg-info
+    env_file:
+      - .env
+    command: uv run python -m channels
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  flower:
+    # built by worker-default
+    image: rengine-worker:latest
+    volumes: *worker-volumes
+    profiles: ["debug"]
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:5555:5555"
+    env_file:
+      - .env
+    command: >
+      uv run celery -A app.celery flower
+      --port=5555
+      --basic-auth=${FLOWER_USER:-admin}:${FLOWER_PASSWORD:-admin}
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile.dev
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/vite.config.ts:/app/vite.config.ts
+    ports:
+      - "${APP_BIND_ADDR:-0.0.0.0}:5173:5173"
     environment:
-      - DEBUG=0
-      - CELERY_BROKER=redis://redis:6379/0
-      - CELERY_BACKEND=redis://redis:6379/0
-      - DOMAIN_NAME=${DOMAIN_NAME}
-      - POSTGRES_DB=${POSTGRES_DB}
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_PORT=${POSTGRES_PORT}
-      - POSTGRES_HOST=${POSTGRES_HOST}
-      - DJANGO_SUPERUSER_PASSWORD=${DJANGO_SUPERUSER_PASSWORD}
-    volumes:
-      - ./web:/usr/src/app
-      - github_repos:/usr/src/github
-      - wordlist:/usr/src/wordlist
-      - scan_results:/usr/src/scan_results
-      - gf_patterns:/root/.gf
-      - nuclei_templates:/root/nuclei-templates
-      - tool_config:/root/.config
-      - static_volume:/usr/src/app/staticfiles/
-    ports:
-      - "127.0.0.1:8000:8000"
+      - NODE_ENV=development
     depends_on:
-      - db
-      - celery
-      - celery-beat
-    networks:
-      rengine_network:
-        aliases:
-          - rengine
-
-  proxy:
-    restart: always
-    image: nginx:alpine
-    ports:
-      - 127.0.0.1:8082:8082/tcp
-      - ${RENGINE_HTTPS_PORT:-443}:443/tcp
-    depends_on:
-      - web
-      - db
-      - redis
-    secrets:
-      - source: proxy.ca
-        target: /etc/nginx/certs/rengine_chain.pem
-      - source: proxy.cert
-        target: /etc/nginx/certs/rengine.pem
-      - source: proxy.key
-        target: /etc/nginx/certs/rengine_rsa.key
-    volumes:
-      - ./config/nginx/rengine.conf:/etc/nginx/conf.d/rengine.conf:ro
-      - static_volume:/usr/src/app/staticfiles/
-      - scan_results:/usr/src/scan_results
-    networks:
-      - rengine_network
-  caddy:
-    image: caddy:2
-    restart: always
-    depends_on:
-      - proxy
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    networks:
-      - rengine_network
-  ollama:
-    image: ollama/ollama
-    container_name: ollama
-    volumes:
-      - ollama_data:/root/.ollama
-    ports:
-      - "11434:11434"
-    networks:
-      - rengine_network
-
-networks:
-  rengine_network:
+      - api
 
 volumes:
-  tool_config:
+  ct_state:
   postgres_data:
-  gf_patterns:
-  nuclei_templates:
-  github_repos:
-  wordlist:
-  scan_results:
-  static_volume:
-  ollama_data:
-  caddy_data:
-  caddy_config:
-
-secrets:
-  proxy.ca:
-    file: ./secrets/certs/rengine_chain.pem
-  proxy.key:
-    file: ./secrets/certs/rengine_rsa.key
-  proxy.cert:
-    file: ./secrets/certs/rengine.pem
+  redis_data:
+  vuln_templates:
+  wordlists:
+  exports_out:
+  reports_out:
+  report_fonts:

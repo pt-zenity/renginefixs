@@ -1,0 +1,16 @@
+from __future__ import annotations
+
+from pydantic import Field
+
+from stages.config import StageConfig
+
+
+class PassivePortsConfig(StageConfig):
+    enabled: bool = Field(
+        default=True,
+        title="Look up indexed ports",
+        description="Read ports indexed for each address by internet-wide scanners.",
+    )
+
+
+MAX_ADDRESSES = 1024

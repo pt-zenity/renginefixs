@@ -1,0 +1,119 @@
+<script lang="ts">
+	import { Skeleton } from '$lib/components/ui/skeleton';
+	import * as DropdownMenu from '$lib/components/ui/dropdown-menu/index.js';
+	import * as Sidebar from '$lib/components/ui/sidebar/index.js';
+	import { ScrollArea } from '$lib/components/ui/scroll-area';
+	import { useSidebar } from '$lib/components/ui/sidebar/index.js';
+	import ChevronsUpDownIcon from '@lucide/svelte/icons/chevrons-up-down';
+	import PlusIcon from '@lucide/svelte/icons/plus';
+	import CheckIcon from '@lucide/svelte/icons/check';
+	import { projectsStore } from '$lib/stores/projects.svelte';
+	import { capabilitiesStore } from '$lib/stores/capabilities.svelte';
+	import { coerceInstanceMode, MODE_LABELS } from '$lib/config/capabilities';
+	import AddProjectModal from '$lib/components/modals/add-project-modal.svelte';
+	import ProjectIcon from '../project-icons.svelte';
+	import { page } from '$app/state';
+	import { goto } from '$app/navigation';
+	import { projectSwitchRedirect } from '$lib/config/routes';
+
+	const sidebar = useSidebar();
+
+	let activeProject = $derived(projectsStore.activeProject);
+	let projects = $derived(projectsStore.projects);
+	let isLoading = $derived(projectsStore.isLoading);
+	let modeLabel = $derived(MODE_LABELS[coerceInstanceMode(capabilitiesStore.mode)]);
+
+	let showAddModal = $state(false);
+
+	function handleProjectSelect(project: (typeof projects)[0]) {
+		if (project.id === activeProject?.id) return;
+		projectsStore.setActiveProject(project);
+
+		const redirect = projectSwitchRedirect(page.url.pathname);
+		if (redirect) goto(redirect);
+	}
+</script>
+
+<AddProjectModal bind:open={showAddModal} />
+
+<Sidebar.Menu>
+	<Sidebar.MenuItem>
+		{#if isLoading}
+			<Sidebar.MenuButton size="lg" disabled aria-busy="true">
+				<Skeleton class="aspect-square size-8 shrink-0 rounded-lg" />
+				<div class="grid flex-1 gap-1.5 text-start">
+					<Skeleton class="h-3.5 w-24" />
+					<Skeleton class="h-3 w-16" />
+				</div>
+			</Sidebar.MenuButton>
+		{:else if !activeProject}
+			<Sidebar.MenuButton size="lg" onclick={() => (showAddModal = true)}>
+				<div
+					class="flex aspect-square size-8 items-center justify-center rounded-lg border border-dashed"
+				>
+					<PlusIcon class="size-4" />
+				</div>
+				<div class="grid flex-1 text-start text-sm leading-tight">
+					<span class="truncate font-medium">Create project</span>
+					<span class="truncate text-xs text-muted-foreground">No projects</span>
+				</div>
+			</Sidebar.MenuButton>
+		{:else}
+			<DropdownMenu.Root>
+				<DropdownMenu.Trigger>
+					{#snippet child({ props })}
+						<Sidebar.MenuButton
+							{...props}
+							size="lg"
+							class="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
+						>
+							<div
+								class="bg-sidebar-primary text-sidebar-primary-foreground flex aspect-square size-8 items-center justify-center rounded-lg"
+							>
+								<ProjectIcon project={activeProject} class="size-4" />
+							</div>
+							<div class="grid flex-1 text-start text-sm leading-tight">
+								<span class="truncate font-medium">
+									{activeProject.name}
+								</span>
+								<span class="truncate text-2xs text-muted-foreground">{modeLabel}</span>
+							</div>
+							<ChevronsUpDownIcon class="ms-auto size-4 text-muted-foreground" />
+						</Sidebar.MenuButton>
+					{/snippet}
+				</DropdownMenu.Trigger>
+				<DropdownMenu.Content
+					class="w-(--bits-dropdown-menu-anchor-width) min-w-56 rounded-lg max-h-none overflow-visible"
+					align="start"
+					side={sidebar.isMobile ? 'bottom' : 'right'}
+					sideOffset={4}
+				>
+					<DropdownMenu.Label class="text-muted-foreground text-xs">Projects</DropdownMenu.Label>
+
+					<ScrollArea class="[&_[data-slot=scroll-area-viewport]]:max-h-72">
+						{#each projects as project (project.id)}
+							<DropdownMenu.Item onSelect={() => handleProjectSelect(project)} class="gap-2 p-2">
+								<div class="flex size-6 items-center justify-center rounded-md border">
+									<ProjectIcon {project} class="size-4" />
+								</div>
+								<span class="flex-1 truncate">{project.name}</span>
+								{#if project.id === activeProject?.id}
+									<CheckIcon class="size-4 text-muted-foreground" />
+								{/if}
+							</DropdownMenu.Item>
+						{/each}
+					</ScrollArea>
+
+					<DropdownMenu.Separator />
+
+					<DropdownMenu.Item class="gap-2 p-2" onSelect={() => (showAddModal = true)}>
+						<div class="flex size-6 items-center justify-center rounded-md border bg-transparent">
+							<PlusIcon class="size-4" />
+						</div>
+						<span class="text-muted-foreground font-medium">Add project</span>
+					</DropdownMenu.Item>
+				</DropdownMenu.Content>
+			</DropdownMenu.Root>
+		{/if}
+	</Sidebar.MenuItem>
+</Sidebar.Menu>

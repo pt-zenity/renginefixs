@@ -1,0 +1,65 @@
+<script lang="ts">
+	import * as DropdownMenu from '$lib/components/ui/dropdown-menu/index.js';
+	import { Button } from '$lib/components/ui/button/index.js';
+	import { Badge } from '$lib/components/ui/badge/index.js';
+	import Hint from '$lib/components/hint.svelte';
+	import { goto } from '$app/navigation';
+	import { ROUTES } from '$lib/config/routes';
+	import Plus from '@lucide/svelte/icons/plus';
+	import Crosshair from '@lucide/svelte/icons/crosshair';
+	import Building from '@lucide/svelte/icons/building';
+	import Cog from '@lucide/svelte/icons/cog';
+	import Layers from '@lucide/svelte/icons/layers';
+	import { toolbox } from '$lib/stores/toolbox.svelte';
+	import { ORG_DOMAINS_ICON as OrgIcon, ORG_DOMAINS_TOOL } from '$lib/config/toolbox';
+
+	let { onAddTarget }: { onAddTarget: () => void } = $props();
+</script>
+
+<Hint text="Create">
+	{#snippet child(hintProps)}
+		<span {...hintProps} class="inline-flex">
+			<DropdownMenu.Root>
+				<DropdownMenu.Trigger>
+					{#snippet child({ props })}
+						<Button {...props} variant="ghost" size="icon">
+							<Plus class="h-4 w-4" />
+							<span class="sr-only">Create</span>
+						</Button>
+					{/snippet}
+				</DropdownMenu.Trigger>
+				<DropdownMenu.Content align="end" class="w-56">
+					<DropdownMenu.Label>Create</DropdownMenu.Label>
+					<DropdownMenu.Separator />
+					<DropdownMenu.Item onclick={onAddTarget}>
+						<Crosshair class="mr-2 h-4 w-4" />
+						Add target
+					</DropdownMenu.Item>
+					<DropdownMenu.Item disabled class="justify-between">
+						<span class="flex items-center">
+							<Building class="mr-2 h-4 w-4" />
+							Add organization
+						</span>
+						<Badge variant="secondary" class="text-2xs">Soon</Badge>
+					</DropdownMenu.Item>
+					<DropdownMenu.Separator />
+					<DropdownMenu.Label class="text-xs text-muted-foreground">Discover</DropdownMenu.Label>
+					<DropdownMenu.Item onclick={() => toolbox.open({ value: '', tool: ORG_DOMAINS_TOOL })}>
+						<OrgIcon class="mr-2 h-4 w-4" />
+						Domains by organization
+					</DropdownMenu.Item>
+					<DropdownMenu.Separator />
+					<DropdownMenu.Label class="text-xs text-muted-foreground">Automation</DropdownMenu.Label>
+					<DropdownMenu.Item onclick={() => goto(ROUTES.engine('new'))}>
+						<Cog class="mr-2 h-4 w-4" />
+						New scan engine
+					</DropdownMenu.Item>
+					<DropdownMenu.Item onclick={() => goto(ROUTES.newContext())}>
+						<Layers class="mr-2 h-4 w-4" />
+						New scan context
+					</DropdownMenu.Item>
+				</DropdownMenu.Content>
+			</DropdownMenu.Root>
+		</span>
+	{/snippet}
+</Hint>

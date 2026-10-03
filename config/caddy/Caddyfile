@@ -1,7 +1,0 @@
-4sus.xyz {
-    reverse_proxy https://proxy:443 {
-        transport http {
-            tls_insecure_skip_verify
-        }
-    }
-}

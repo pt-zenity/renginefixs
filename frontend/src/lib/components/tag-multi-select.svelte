@@ -1,0 +1,230 @@
+<script lang="ts">
+	import X from '@lucide/svelte/icons/x';
+	import Check from '@lucide/svelte/icons/check';
+	import Plus from '@lucide/svelte/icons/plus';
+	import Search from '@lucide/svelte/icons/search';
+	import { Badge } from '$lib/components/ui/badge';
+	import { Button } from '$lib/components/ui/button';
+	import * as Popover from '$lib/components/ui/popover';
+	import * as Command from '$lib/components/ui/command';
+	import { ScrollArea } from '$lib/components/ui/scroll-area';
+
+	interface TagItem {
+		id: string;
+		label: string;
+		color: string;
+	}
+
+	interface Props {
+		items: TagItem[];
+		selected: TagItem[];
+		onSelect: (item: TagItem) => void;
+		onRemove: (item: TagItem) => void;
+		onCreate?: (label: string, color: string) => void;
+		placeholder?: string;
+	}
+
+	let {
+		items,
+		selected,
+		onSelect,
+		onRemove,
+		onCreate,
+		placeholder = 'Search tags'
+	}: Props = $props();
+
+	let open = $state(false);
+	let searchValue = $state('');
+	let showColorPicker = $state(false);
+	let selectedColor = $state('#64748b');
+	let colorPickerEl = $state<HTMLDivElement | null>(null);
+
+	$effect(() => {
+		if (showColorPicker) colorPickerEl?.focus();
+	});
+
+	const presetColors = [
+		'#64748b',
+		'#4f7cc4',
+		'#6366f1',
+		'#7c6bb0',
+		'#3f9e93',
+		'#c2855a',
+		'#be5a6e',
+		'#5a9e6f'
+	];
+
+	let filteredItems = $derived(
+		items.filter(
+			(item) =>
+				item.label.toLowerCase().includes(searchValue.toLowerCase()) &&
+				!selected.some((s) => s.id === item.id)
+		)
+	);
+
+	let showCreateOption = $derived(
+		searchValue.trim() !== '' &&
+			!items.some((item) => item.label.toLowerCase() === searchValue.toLowerCase())
+	);
+
+	function handleSelect(item: TagItem) {
+		onSelect(item);
+		searchValue = '';
+	}
+
+	function handleStartCreate() {
+		showColorPicker = true;
+	}
+
+	function handleConfirmCreate() {
+		if (onCreate && searchValue.trim()) {
+			onCreate(searchValue.trim(), selectedColor);
+			searchValue = '';
+			showColorPicker = false;
+			selectedColor = '#6366f1';
+		}
+	}
+
+	function handleCancelCreate() {
+		showColorPicker = false;
+	}
+
+	function handleSearchKeydown(e: KeyboardEvent) {
+		if (e.key === 'Enter' && showCreateOption) {
+			e.preventDefault();
+			handleStartCreate();
+		}
+	}
+
+	function handleColorKeydown(e: KeyboardEvent) {
+		if (e.key === 'Enter') {
+			e.preventDefault();
+			handleConfirmCreate();
+		}
+	}
+</script>
+
+<div class="space-y-2">
+	{#if selected.length > 0}
+		<div class="flex flex-wrap gap-1.5">
+			{#each selected as item (item.id)}
+				<Badge
+					variant="secondary"
+					class="gap-1.5 pr-1 font-normal border"
+					style="background-color: {item.color}15; color: {item.color}; border-color: {item.color}30;"
+				>
+					<span class="h-2 w-2 rounded-full shrink-0" style="background-color: {item.color}"></span>
+					{item.label}
+					<button
+						type="button"
+						class="ml-0.5 rounded-full hover:bg-foreground/10 p-0.5"
+						onclick={() => onRemove(item)}
+					>
+						<X class="h-3 w-3" />
+					</button>
+				</Badge>
+			{/each}
+		</div>
+	{/if}
+
+	<Popover.Root bind:open>
+		<Popover.Trigger class="w-full">
+			{#snippet child({ props })}
+				<Button
+					{...props}
+					variant="outline"
+					role="combobox"
+					class="w-full justify-start text-muted-foreground font-normal h-9"
+				>
+					<Search class="h-4 w-4 mr-2 shrink-0" />
+					{placeholder}
+				</Button>
+			{/snippet}
+		</Popover.Trigger>
+		<Popover.Content class="w-[--radix-popover-trigger-width] p-0" align="start">
+			{#if showColorPicker}
+				<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+				<div
+					bind:this={colorPickerEl}
+					class="p-3 space-y-3"
+					role="group"
+					aria-label="Color for {searchValue}"
+					tabindex="-1"
+					onkeydown={handleColorKeydown}
+				>
+					<div class="flex items-center justify-between">
+						<span class="text-sm font-medium">Color for "{searchValue}"</span>
+					</div>
+					<div class="flex flex-wrap gap-2">
+						{#each presetColors as color (color)}
+							<button
+								type="button"
+								class="h-6 w-6 rounded-full border-2 {selectedColor === color
+									? 'border-foreground'
+									: 'border-transparent'}"
+								style="background-color: {color}"
+								onclick={() => (selectedColor = color)}
+							>
+								{#if selectedColor === color}
+									<Check class="h-3 w-3 text-white mx-auto" />
+								{/if}
+							</button>
+						{/each}
+					</div>
+					<div class="flex items-center gap-2 pt-1">
+						<Button variant="ghost" size="sm" onclick={handleCancelCreate}>Cancel</Button>
+						<Button size="sm" onclick={handleConfirmCreate} class="gap-1.5">
+							<span class="h-2.5 w-2.5 rounded-full" style="background-color: {selectedColor}"
+							></span>
+							Create tag
+						</Button>
+					</div>
+				</div>
+			{:else}
+				<Command.Root shouldFilter={false}>
+					<Command.Input {placeholder} bind:value={searchValue} onkeydown={handleSearchKeydown} />
+					<Command.List class="max-h-none overflow-visible">
+						<Command.Empty>
+							{#if !showCreateOption}
+								No tags
+							{/if}
+						</Command.Empty>
+						<ScrollArea class="[&_[data-slot=scroll-area-viewport]]:max-h-72">
+							<Command.Group>
+								{#each filteredItems as item (item.id)}
+									<Command.Item
+										value={item.id}
+										onSelect={() => handleSelect(item)}
+										class="flex items-center gap-2"
+									>
+										<span
+											class="h-2.5 w-2.5 rounded-full shrink-0"
+											style="background-color: {item.color}"
+										></span>
+										<span class="flex-1 truncate">{item.label}</span>
+										{#if selected.some((s) => s.id === item.id)}
+											<Check class="h-4 w-4 text-primary" />
+										{/if}
+									</Command.Item>
+								{/each}
+							</Command.Group>
+						</ScrollArea>
+
+						{#if showCreateOption}
+							<Command.Group>
+								<Command.Item
+									value="__create__"
+									onSelect={handleStartCreate}
+									class="flex items-center gap-2 text-primary"
+								>
+									<Plus class="h-4 w-4" />
+									<span>Create "{searchValue}"</span>
+								</Command.Item>
+							</Command.Group>
+						{/if}
+					</Command.List>
+				</Command.Root>
+			{/if}
+		</Popover.Content>
+	</Popover.Root>
+</div>

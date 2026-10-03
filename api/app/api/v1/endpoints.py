@@ -1,0 +1,215 @@
+from typing import Annotated, Literal
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import CurrentUser
+from app.api.scope import EndpointScope
+from app.core.database import get_session
+from app.services.endpoint import EndpointService
+from app.services.endpoint_structure import EndpointStructureService
+from shared.models.asset_query import QueryGroups, QueryLeads
+from shared.models.endpoint import (
+    CoverageRead,
+    EndpointDetail,
+    EndpointFacets,
+    EndpointFilter,
+    EndpointPage,
+    EndpointSummary,
+    EndpointTree,
+    GonePage,
+    HostBrief,
+    HostPage,
+    MergedLeafPage,
+    ScanStructure,
+    VerifyBranchRequest,
+    VerifyBranchResponse,
+)
+from shared.services.asset_query import lead_cache
+
+router = APIRouter(prefix="/endpoints", tags=["endpoints"])
+
+TreeMode = Literal["host", "merged"]
+
+
+def get_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> EndpointService:
+    return EndpointService(session)
+
+
+@router.post("/search", response_model=EndpointPage)
+async def search_endpoints(
+    _current_user: CurrentUser,
+    service: Annotated[EndpointService, Depends(get_service)],
+    scope: EndpointScope,
+    body: EndpointFilter,
+):
+    return await lead_cache.cached(
+        service.session,
+        name="search:endpoints",
+        scans=scope.ids,
+        facets=body.model_dump_json(),
+        model=EndpointPage,
+        build=lambda: service.search(scope, body),
+        ttl=lead_cache.SEARCH_TTL_SECONDS,
+        live_ttl=None,
+    )
+
+
+@router.post("/search/leads", response_model=QueryLeads)
+async def endpoint_leads(
+    _current_user: CurrentUser,
+    service: Annotated[EndpointService, Depends(get_service)],
+    scope: EndpointScope,
+    body: EndpointFilter,
+):
+    return await service.leads(scope, body)
+
+
+@router.post("/search/groups", response_model=QueryGroups)
+async def endpoint_groups(
+    _current_user: CurrentUser,
+    service: Annotated[EndpointService, Depends(get_service)],
+    scope: EndpointScope,
+    group_by: Annotated[str, Query(description="Group dimension")],
+    body: EndpointFilter,
+):
+    return await service.groups(scope, body, group_by)
+
+
+@router.post("/tree", response_model=EndpointTree)
+async def endpoint_tree(
+    _current_user: CurrentUser,
+    service: Annotated[EndpointService, Depends(get_service)],
+    scope: EndpointScope,
+    body: EndpointFilter,
+    mode: Annotated[TreeMode, Query(description="host or merged")] = "host",
+):
+    return await service.tree(scope, body, mode)
+
+
+@router.post("/tree/hosts", response_model=HostPage)
+async def endpoint_tree_hosts(
+    _current_user: CurrentUser,
+    service: Annotated[EndpointService, Depends(get_service)],
+    scope: EndpointScope,
+    body: EndpointFilter,
+):
+    return await service.hosts(scope, body)
+
+
+@router.post("/tree/leaves", response_model=MergedLeafPage)
+async def endpoint_tree_leaves(
+    _current_user: CurrentUser,
+    service: Annotated[EndpointService, Depends(get_service)],
+    scope: EndpointScope,
+    body: EndpointFilter,
+):
+    return await service.merged_leaves(scope, body)
+
+
+@router.post("/verify", response_model=VerifyBranchResponse)
+async def endpoint_verify_branch(
+    _current_user: CurrentUser,
+    service: Annotated[EndpointService, Depends(get_service)],
+    scan_id: Annotated[UUID, Query(description="Scan ID")],
+    body: VerifyBranchRequest,
+):
+    return await service.verify_branch(scan_id, body)
+
+
+@router.post("/gone", response_model=GonePage)
+async def endpoint_gone(
+    _current_user: CurrentUser,
+    service: Annotated[EndpointService, Depends(get_service)],
+    scan_id: Annotated[UUID, Query(description="Scan ID")],
+    body: EndpointFilter,
+):
+    return await service.gone(scan_id, body)
+
+
+@router.get("/facets", response_model=EndpointFacets)
+async def endpoint_facets(
+    _current_user: CurrentUser,
+    service: Annotated[EndpointService, Depends(get_service)],
+    scope: EndpointScope,
+    q: Annotated[str | None, Query(description="Query string")] = None,
+):
+    return await lead_cache.cached(
+        service.session,
+        name="facets:endpoints",
+        scans=scope.ids,
+        facets=q or "",
+        model=EndpointFacets,
+        build=lambda: service.facets(scope, EndpointFilter(q=q)),
+    )
+
+
+@router.get("/summary", response_model=EndpointSummary)
+async def endpoint_summary(
+    _current_user: CurrentUser,
+    service: Annotated[EndpointService, Depends(get_service)],
+    scope: EndpointScope,
+    host: Annotated[str | None, Query(description="Host name")] = None,
+):
+    return await lead_cache.cached(
+        service.session,
+        name="summary:endpoints",
+        scans=scope.ids,
+        facets=host or "",
+        model=EndpointSummary,
+        build=lambda: service.summary(scope, host),
+    )
+
+
+@router.get("/host", response_model=HostBrief)
+async def endpoint_host_brief(
+    _current_user: CurrentUser,
+    service: Annotated[EndpointService, Depends(get_service)],
+    scope: EndpointScope,
+    host: Annotated[str, Query(description="Hostname", max_length=500)],
+    hide_static: Annotated[bool, Query(description="Exclude static files")] = True,
+):
+    return await service.host_brief(scope, host, hide_static)
+
+
+@router.get("/coverage", response_model=list[CoverageRead])
+async def endpoint_coverage(
+    _current_user: CurrentUser,
+    service: Annotated[EndpointService, Depends(get_service)],
+    scan_id: Annotated[UUID, Query(description="Scan ID")],
+):
+    return await service.coverage(scan_id)
+
+
+@router.get("/structure", response_model=ScanStructure)
+async def endpoint_structure(
+    _current_user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    scan_id: Annotated[UUID, Query(description="Scan ID")],
+):
+    return await lead_cache.cached(
+        session,
+        name="structure",
+        scans=(scan_id,),
+        facets="",
+        model=ScanStructure,
+        build=lambda: EndpointStructureService(session).build(scan_id),
+    )
+
+
+@router.get("/{endpoint_id}", response_model=EndpointDetail)
+async def get_endpoint(
+    _current_user: CurrentUser,
+    service: Annotated[EndpointService, Depends(get_service)],
+    scan_id: Annotated[UUID, Query(description="Scan ID")],
+    endpoint_id: Annotated[UUID, Path(description="Endpoint ID")],
+):
+    row = await service.detail(scan_id, endpoint_id)
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Endpoint not found"
+        )
+    return row

@@ -1,0 +1,61 @@
+import uuid
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from shared.definitions.surface import MAX_SELECTED_ROWS
+
+
+class SurfaceTargetRead(BaseModel):
+    target_id: uuid.UUID
+    target_value: str
+    target_type: str
+    scan_id: uuid.UUID | None = None
+    scan_status: str | None = None
+    observed_at: datetime | None = None
+    stale: bool = False
+
+
+class SurfaceCoverage(BaseModel):
+    dimension: str
+    label: str
+    noun: str
+    noun_plural: str
+    total: int = 0
+    total_capped: bool = False
+    targets_total: int = 0
+    targets_covered: int = 0
+    observed_from: datetime | None = None
+    observed_to: datetime | None = None
+    covered: list[SurfaceTargetRead] = Field(default_factory=list)
+    uncovered: list[SurfaceTargetRead] = Field(default_factory=list)
+
+    @property
+    def stale_targets(self) -> int:
+        return sum(1 for row in self.covered if row.stale)
+
+
+class SurfaceOverview(BaseModel):
+    project_id: uuid.UUID
+    targets_total: int = 0
+    live_scans: int = 0
+    exposures: int = 0
+    cves: int = 0
+    dimensions: list[SurfaceCoverage] = Field(default_factory=list)
+    generated_at: datetime
+
+
+class SurfaceDelete(BaseModel):
+    """The rows a table asked to remove, addressed the way that table addresses them."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dimension: str = Field(max_length=32)
+    ids: list[str] = Field(min_length=1, max_length=MAX_SELECTED_ROWS)
+    key: str | None = Field(default=None, max_length=32)
+
+
+class SurfaceDeleteResult(BaseModel):
+    dimension: str
+    deleted: int = 0
+    related: dict[str, int] = Field(default_factory=dict)

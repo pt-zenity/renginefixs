@@ -1,0 +1,43 @@
+import uuid
+from datetime import datetime
+
+from pydantic import BaseModel
+from sqlmodel import Field, SQLModel
+
+from shared.enums.activity import ActivityEvent, ActivityLevel
+from shared.utils.datetime import utc_now
+
+
+class ActivityLog(SQLModel, table=True):
+    __tablename__ = "activity_logs"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    timestamp: datetime = Field(default_factory=utc_now, index=True)
+    level: ActivityLevel = Field(default=ActivityLevel.INFO)
+    event_type: ActivityEvent = Field(index=True)
+    title: str = Field(max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+
+    project_id: uuid.UUID | None = Field(
+        default=None, foreign_key="projects.id", index=True
+    )
+    target_id: uuid.UUID | None = Field(
+        default=None, foreign_key="targets.id", index=True, ondelete="SET NULL"
+    )
+    user_id: uuid.UUID | None = Field(default=None, foreign_key="users.id", index=True)
+    scan_id: uuid.UUID | None = Field(default=None, index=True)
+    target_value: str | None = Field(default=None, max_length=500)
+
+
+class ActivityLogRead(BaseModel):
+    id: uuid.UUID
+    timestamp: datetime
+    level: ActivityLevel
+    event_type: ActivityEvent
+    title: str
+    description: str | None = None
+    project_id: uuid.UUID | None = None
+    target_id: uuid.UUID | None = None
+    user_id: uuid.UUID | None = None
+    scan_id: uuid.UUID | None = None
+    target_value: str | None = None

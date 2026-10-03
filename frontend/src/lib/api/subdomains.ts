@@ -1,0 +1,174 @@
+import { api } from './client';
+import { scopeQuery, type TargetScope } from '$lib/utilities/surface-scope';
+import type { HostingComposition } from '$lib/types/hosting';
+import type { CorrelationGraph } from '$lib/types/correlation';
+import type { RenderGroups, SubdomainSummary, TargetSubdomainRead } from '$lib/types/subdomain';
+import type { QueryCounts, QueryGroups, QueryLeads } from '$lib/types/asset-query';
+import type {
+	Facet,
+	SubdomainFilter,
+	SubdomainSearchResult,
+	SubdomainFacetSet,
+	SubdomainRelation,
+	SubdomainInsights,
+	SubdomainCorrelation,
+	HygieneSummary
+} from '$lib/utilities/scan-insights';
+
+interface ListParams {
+	active_only?: boolean;
+	search?: string;
+	limit?: number;
+	offset?: number;
+}
+
+function buildQuery(base: Record<string, string>, params: ListParams): string {
+	const sp = new URLSearchParams(base);
+	if (params.active_only) sp.append('active_only', 'true');
+	if (params.search) sp.append('search', params.search);
+	if (params.limit != null) sp.append('limit', String(params.limit));
+	if (params.offset != null) sp.append('offset', String(params.offset));
+	return sp.toString();
+}
+
+export const subdomainsApi = {
+	async rollup(
+		projectId: string,
+		targetId: string,
+		params: ListParams = {}
+	): Promise<TargetSubdomainRead[]> {
+		const q = buildQuery({ project_id: projectId, target_id: targetId }, params);
+		return api.get<TargetSubdomainRead[]>(`/subdomains/rollup?${q}`);
+	},
+
+	async rollupSummary(projectId: string, targetId: string): Promise<SubdomainSummary> {
+		return api.get<SubdomainSummary>(
+			`/subdomains/rollup/summary?project_id=${projectId}&target_id=${targetId}`
+		);
+	},
+
+	async search(
+		projectId: string,
+		scanId: string,
+		filter: SubdomainFilter
+	): Promise<SubdomainSearchResult> {
+		return api.post<SubdomainSearchResult>(
+			`/subdomains/search?${scopeQuery({ projectId, scanId })}`,
+			filter
+		);
+	},
+
+	async counts(
+		projectId: string,
+		scanId: string,
+		queries: string[],
+		scope: TargetScope = {}
+	): Promise<QueryCounts> {
+		return api.post<QueryCounts>(
+			`/subdomains/search/counts?${scopeQuery({ projectId, scanId, ...scope })}`,
+			{
+				queries
+			}
+		);
+	},
+
+	async leads(projectId: string, scanId: string, filter: SubdomainFilter): Promise<QueryLeads> {
+		return api.post<QueryLeads>(
+			`/subdomains/search/leads?${scopeQuery({ projectId, scanId })}`,
+			filter
+		);
+	},
+
+	async groups(
+		projectId: string,
+		scanId: string,
+		groupBy: string,
+		filter: SubdomainFilter
+	): Promise<QueryGroups> {
+		return api.post<QueryGroups>(
+			`/subdomains/search/groups?${scopeQuery({ projectId, scanId })}&group_by=${encodeURIComponent(groupBy)}`,
+			filter
+		);
+	},
+
+	async renders(projectId: string, scanId: string, filter: SubdomainFilter): Promise<RenderGroups> {
+		return api.post<RenderGroups>(
+			`/subdomains/search/renders?${scopeQuery({ projectId, scanId })}`,
+			filter
+		);
+	},
+
+	async correlationGraph(
+		projectId: string,
+		scanId: string,
+		scope: TargetScope = {}
+	): Promise<CorrelationGraph> {
+		return api.get<CorrelationGraph>(
+			`/subdomains/correlation-graph?${scopeQuery({ projectId, scanId, ...scope })}`
+		);
+	},
+
+	async hosting(projectId: string, scanId: string): Promise<HostingComposition> {
+		return api.get<HostingComposition>(`/subdomains/hosting?${scopeQuery({ projectId, scanId })}`);
+	},
+
+	async facets(
+		projectId: string,
+		scanId: string,
+		scope: TargetScope = {}
+	): Promise<SubdomainFacetSet> {
+		return api.get<SubdomainFacetSet>(
+			`/subdomains/facets?${scopeQuery({ projectId, scanId, ...scope })}`
+		);
+	},
+
+	async related(projectId: string, scanId: string, name: string): Promise<SubdomainRelation[]> {
+		return api.get<SubdomainRelation[]>(
+			`/subdomains/related?${scopeQuery({ projectId, scanId })}&name=${encodeURIComponent(name)}`
+		);
+	},
+
+	async tech(projectId: string, scanId: string, search = '', limit = 100): Promise<Facet[]> {
+		const sp = new URLSearchParams({
+			project_id: projectId,
+			scan_id: scanId,
+			limit: String(limit)
+		});
+		if (search.trim()) sp.append('search', search.trim());
+		return api.get<Facet[]>(`/subdomains/tech?${sp.toString()}`);
+	},
+
+	async hygiene(
+		projectId: string,
+		scanId: string,
+		scope: TargetScope = {}
+	): Promise<HygieneSummary> {
+		return api.get<HygieneSummary>(
+			`/subdomains/hygiene?${scopeQuery({ projectId, scanId, ...scope })}`
+		);
+	},
+
+	async posture(
+		projectId: string,
+		scanId: string,
+		scope: TargetScope = {}
+	): Promise<HygieneSummary> {
+		return api.get<HygieneSummary>(
+			`/subdomains/posture?${scopeQuery({ projectId, scanId, ...scope })}`
+		);
+	},
+
+	async insights(projectId: string, scanId: string): Promise<SubdomainInsights> {
+		return api.get<SubdomainInsights>(`/subdomains/insights?${scopeQuery({ projectId, scanId })}`);
+	},
+
+	async correlation(
+		projectId: string,
+		scanId: string,
+		name: string
+	): Promise<SubdomainCorrelation> {
+		return api.get<SubdomainCorrelation>(
+			`/subdomains/correlation?${scopeQuery({ projectId, scanId })}&name=${encodeURIComponent(name)}`
+		);
+	}
+};

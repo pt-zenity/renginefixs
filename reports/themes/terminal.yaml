@@ -1,0 +1,42 @@
+key: terminal
+name: Terminal
+description: Monospaced headings, near-black cover, compact tables.
+author: reNgine
+version: "3"
+color:
+  page: "#ffffff"
+  ink: "#1f272b"
+  ink_soft: "#676f74"
+  ink_faint: "#8c9298"
+  rule: "#eaeef0"
+  rule_strong: "#d8dde0"
+  surface: "#f5f9f9"
+  surface_soft: "#fafcfc"
+  accent: "#21895d"
+  accent_soft: "#eefaf3"
+  accent_ink: "#ffffff"
+type:
+  heading: jetbrains-mono
+  body: ibm-plex-sans
+  mono: jetbrains-mono
+  base_size: 10.0
+  scale: 1.18
+  line_height: 1.56
+  heading_weight: 700
+  heading_tracking: -0.035
+  label_tracking: 0.02
+  uppercase_labels: false
+layout:
+  rule_width: 0.5
+  radius: 0
+  pill: false
+  block_gap: 0.95
+  table: open
+  finding: banner
+  heading: kicker
+cover:
+  layout: full
+  art: scan
+  ink: light
+  background: "#101a1e"
+  accent_bar: true

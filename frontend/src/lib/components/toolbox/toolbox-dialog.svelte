@@ -1,0 +1,263 @@
+<script lang="ts">
+	import * as Dialog from '$lib/components/ui/dialog';
+	import { ScrollArea } from '$lib/components/ui/scroll-area';
+	import { Badge } from '$lib/components/ui/badge';
+	import { Spinner } from '$lib/components/ui/spinner';
+	import { Button } from '$lib/components/ui/button';
+	import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
+	import EmptyState from '$lib/components/empty-state.svelte';
+	import Hint from '$lib/components/hint.svelte';
+	import ToolList from './tool-list.svelte';
+	import ToolForm from './tool-form.svelte';
+	import RunSection from './run-section.svelte';
+	import RecentRuns from './recent-runs.svelte';
+	import { toolbox } from '$lib/stores/toolbox.svelte';
+	import { projectsStore } from '$lib/stores/projects.svelte';
+	import { MODE_HELP, MODE_LABELS, toolIcon } from '$lib/config/toolbox';
+	import { STORAGE_KEYS } from '$lib/config/storage-keys';
+	import { toast } from 'svelte-sonner';
+	import { untrack } from 'svelte';
+	import type { ToolboxLaunch, ToolRun } from '$lib/types/toolbox';
+
+	interface Props {
+		open?: boolean;
+		launch?: ToolboxLaunch | null;
+	}
+
+	let { open = $bindable(false), launch = $bindable(null) }: Props = $props();
+
+	let selected = $state<string | null>(null);
+	let values = $state<Record<string, Record<string, unknown>>>({});
+	let shown = $state<Record<string, string>>({});
+	let form: ReturnType<typeof ToolForm> | null = $state(null);
+
+	const projectId = $derived(projectsStore.activeProject?.id);
+	const tool = $derived(selected ? toolbox.tool(selected) : undefined);
+	const Icon = $derived(tool ? toolIcon(tool.icon) : null);
+	let starting = $state<Record<string, ToolRun>>({});
+	const run = $derived.by(() => {
+		if (!selected) return undefined;
+		if (starting[selected]) return starting[selected];
+		const id = shown[selected];
+		return id ? toolbox.runs.find((r) => r.id === id) : toolbox.lastRun(selected);
+	});
+
+	$effect(() => {
+		if (!open) return;
+		void toolbox.load();
+		const names = toolbox.tools.map((t) => t.name);
+		if (!names.length) return;
+		const stored = localStorage.getItem(STORAGE_KEYS.toolboxLastTool);
+		untrack(() => {
+			if (selected && names.includes(selected)) return;
+			selected = stored && names.includes(stored) ? stored : names[0];
+		});
+	});
+
+	$effect(() => {
+		if (!open || !tool) return;
+		localStorage.setItem(STORAGE_KEYS.toolboxLastTool, tool.name);
+		untrack(() => queueMicrotask(() => form?.focus()));
+	});
+
+	$effect(() => {
+		const pending = launch;
+		if (!open || !pending || !toolbox.tools.length) return;
+		launch = null;
+		untrack(() => {
+			const value = pending.value.trim();
+			if (!value) {
+				if (pending.tool && toolbox.tool(pending.tool)) selected = pending.tool;
+				queueMicrotask(() => form?.focus());
+			} else if (pending.run) chase(value, pending.tool ?? null);
+			else if (prefill(value, pending.tool ?? null)) queueMicrotask(() => form?.focus());
+		});
+	});
+
+	function change(name: string, value: unknown) {
+		if (!selected) return;
+		values = { ...values, [selected]: { ...(values[selected] ?? {}), [name]: value } };
+	}
+
+	function payload(name: string): Record<string, unknown> {
+		const spec = toolbox.tool(name);
+		if (!spec) return {};
+		const current = values[name] ?? {};
+		const out: Record<string, unknown> = {};
+		for (const f of spec.fields) {
+			const value = current[f.name] ?? f.default;
+			if (value !== null && value !== undefined && value !== '') out[f.name] = value;
+		}
+		return out;
+	}
+
+	function placeholder(name: string, input: Record<string, unknown>): ToolRun {
+		const spec = toolbox.tool(name);
+		const value = spec ? input[spec.value_field] : undefined;
+		return {
+			id: `starting:${name}`,
+			tool: name,
+			title: spec?.title ?? name,
+			label: typeof value === 'string' ? value : (spec?.title ?? name),
+			input,
+			status: 'running',
+			summary: null,
+			blocks: [],
+			caveats: [],
+			pivot: null,
+			raw: null,
+			error: null,
+			queued_at: new Date().toISOString(),
+			started_at: null,
+			finished_at: null,
+			duration_ms: null
+		};
+	}
+
+	async function start(name: string) {
+		const input = payload(name);
+		starting = { ...starting, [name]: placeholder(name, input) };
+		try {
+			const started = await toolbox.run(name, input, projectId);
+			shown = { ...shown, [name]: started.id };
+		} catch (e) {
+			toast.error(e instanceof Error ? e.message : 'Run not started');
+		} finally {
+			const next = { ...starting };
+			delete next[name];
+			starting = next;
+		}
+	}
+
+	function prefill(value: string, name: string | null): string | null {
+		const target = name ?? selected;
+		const spec = target ? toolbox.tool(target) : undefined;
+		if (!spec) return null;
+		selected = spec.name;
+		values = {
+			...values,
+			[spec.name]: { ...(values[spec.name] ?? {}), [spec.value_field]: value }
+		};
+		return spec.name;
+	}
+
+	/** Opens the tool that answers the value, prefilled. */
+	function chase(value: string, name: string | null) {
+		const ready = prefill(value, name);
+		if (ready) void start(ready);
+	}
+
+	function replay(previous: ToolRun) {
+		selected = previous.tool;
+		shown = { ...shown, [previous.tool]: previous.id };
+		values = { ...values, [previous.tool]: { ...previous.input } };
+	}
+
+	async function clearHistory() {
+		await toolbox.clear();
+		shown = {};
+	}
+</script>
+
+<Dialog.Root bind:open>
+	<Dialog.Content class="max-h-[88vh] gap-0 overflow-hidden p-0 sm:max-w-4xl">
+		<Dialog.Header class="border-b px-4 py-2.5">
+			<Dialog.Title class="text-sm font-medium">Toolbox</Dialog.Title>
+			<Dialog.Description class="sr-only">
+				Lookup, discovery and intelligence tools
+			</Dialog.Description>
+		</Dialog.Header>
+
+		<div class="grid h-[70vh] min-h-0 grid-cols-1 md:grid-cols-[13.5rem_minmax(0,1fr)]">
+			<aside class="hidden min-h-0 min-w-0 flex-col border-r md:flex">
+				{#if toolbox.loadingCatalog && !toolbox.tools.length}
+					<div class="flex flex-1 items-center justify-center">
+						<Spinner class="size-4 text-muted-foreground" />
+					</div>
+				{:else if toolbox.catalogError && !toolbox.tools.length}
+					<EmptyState
+						compact
+						icon={TriangleAlert}
+						title="Tools not loaded"
+						description={toolbox.catalogError}
+						class="m-3 border-dashed"
+					>
+						<Button variant="outline" size="sm" onclick={() => void toolbox.load(true)}>
+							Retry
+						</Button>
+					</EmptyState>
+				{:else}
+					<ToolList
+						tools={toolbox.tools}
+						groups={toolbox.groups}
+						{selected}
+						onSelect={(name) => (selected = name)}
+					/>
+					<RecentRuns
+						runs={toolbox.history}
+						error={toolbox.historyError}
+						activeId={run?.id ?? null}
+						onOpen={replay}
+						onClear={clearHistory}
+					/>
+				{/if}
+			</aside>
+
+			<section class="flex min-h-0 min-w-0 flex-col">
+				{#if tool}
+					<div class="space-y-2.5 border-b px-4 py-3">
+						<div class="flex items-start gap-2">
+							{#if Icon}
+								<span class="flex h-5 shrink-0 items-center"><Icon class="size-4" /></span>
+							{/if}
+							<div class="min-w-0 flex-1">
+								<div class="flex items-center gap-2">
+									<h3 class="text-sm leading-5 font-medium">{tool.title}</h3>
+									{#if tool.touches_target}
+										<Hint text={MODE_HELP.active}>
+											{#snippet child(props)}
+												<span {...props} class="inline-flex">
+													<Badge variant="warning" class="h-4 px-1.5 text-2xs">
+														{MODE_LABELS.active}
+													</Badge>
+												</span>
+											{/snippet}
+										</Hint>
+									{/if}
+								</div>
+								<p class="text-xs leading-snug text-muted-foreground">{tool.description}</p>
+							</div>
+						</div>
+						<ToolForm
+							bind:this={form}
+							{tool}
+							values={values[tool.name] ?? {}}
+							busy={toolbox.busy}
+							onChange={change}
+							onSubmit={() => start(tool.name)}
+						/>
+					</div>
+					<ScrollArea class="min-h-0 flex-1">
+						<div class="px-4 py-3">
+							{#if run}
+								<RunSection {run} onLookup={chase} onNavigate={() => (open = false)} />
+							{:else if tool.examples.length}
+								<p class="py-4 text-sm text-muted-foreground">
+									Examples: {tool.examples.join(', ')}
+								</p>
+							{/if}
+						</div>
+					</ScrollArea>
+				{:else if toolbox.catalogError}
+					<div class="flex flex-1 items-center justify-center px-6 text-center">
+						<p class="text-sm text-muted-foreground">Tools not loaded. {toolbox.catalogError}</p>
+					</div>
+				{:else}
+					<div class="flex flex-1 items-center justify-center">
+						<Spinner class="size-4 text-muted-foreground" />
+					</div>
+				{/if}
+			</section>
+		</div>
+	</Dialog.Content>
+</Dialog.Root>

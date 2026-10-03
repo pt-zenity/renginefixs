@@ -1,0 +1,188 @@
+from typing import Annotated
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import CurrentUser
+from app.api.scope import VulnScope
+from app.core.database import get_session
+from app.services.scan_surface import ScanSurfaceService
+from app.services.vulnerability import VulnerabilityService
+from shared.definitions.vulnerabilities import VULN_STATES
+from shared.models.asset_query import QueryGroups, QueryLeads
+from shared.models.scan_surface import SurfaceSummary
+from shared.models.vulnerability import (
+    BulkTriageResult,
+    BulkTriageUpdate,
+    CoverageRead,
+    IssuePage,
+    ScanVulnerabilities,
+    TriageResult,
+    TriageUpdate,
+    VulnerabilityFacets,
+    VulnerabilityFilter,
+    VulnerabilityPage,
+    VulnerabilityRead,
+)
+from shared.services.asset_query import lead_cache
+
+router = APIRouter(prefix="/vulnerabilities", tags=["vulnerabilities"])
+
+
+def get_service(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> VulnerabilityService:
+    return VulnerabilityService(session)
+
+
+def _check_state(state: str) -> None:
+    if state not in VULN_STATES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unknown review state '{state}'. Expected one of "
+            f"{', '.join(sorted(VULN_STATES))}.",
+        )
+
+
+@router.post("/search", response_model=VulnerabilityPage)
+async def search_vulnerabilities(
+    _current_user: CurrentUser,
+    service: Annotated[VulnerabilityService, Depends(get_service)],
+    scope: VulnScope,
+    body: VulnerabilityFilter,
+):
+    return await lead_cache.cached(
+        service.session,
+        name="search:vulnerabilities",
+        scans=scope.ids,
+        facets=body.model_dump_json(),
+        model=VulnerabilityPage,
+        build=lambda: service.search(scope, body),
+        ttl=lead_cache.SEARCH_TTL_SECONDS,
+        live_ttl=None,
+    )
+
+
+@router.post("/search/issues", response_model=IssuePage)
+async def search_issues(
+    _current_user: CurrentUser,
+    service: Annotated[VulnerabilityService, Depends(get_service)],
+    scope: VulnScope,
+    body: VulnerabilityFilter,
+):
+    return await service.issues(scope, body)
+
+
+@router.post("/search/leads", response_model=QueryLeads)
+async def vulnerability_leads(
+    _current_user: CurrentUser,
+    service: Annotated[VulnerabilityService, Depends(get_service)],
+    scope: VulnScope,
+    body: VulnerabilityFilter,
+):
+    return await service.leads(scope, body)
+
+
+@router.post("/search/groups", response_model=QueryGroups)
+async def vulnerability_groups(
+    _current_user: CurrentUser,
+    service: Annotated[VulnerabilityService, Depends(get_service)],
+    scope: VulnScope,
+    group_by: Annotated[str, Query(description="Group dimension key", max_length=40)],
+    body: VulnerabilityFilter,
+):
+    return await service.groups(scope, body, group_by)
+
+
+@router.get("/facets", response_model=VulnerabilityFacets)
+async def vulnerability_facets(
+    _current_user: CurrentUser,
+    service: Annotated[VulnerabilityService, Depends(get_service)],
+    scope: VulnScope,
+):
+    return await lead_cache.cached(
+        service.session,
+        name="facets:vulnerabilities",
+        scans=scope.ids,
+        facets="",
+        model=VulnerabilityFacets,
+        build=lambda: service.facets(scope),
+    )
+
+
+@router.get("/overview", response_model=ScanVulnerabilities)
+async def vulnerability_overview(
+    _current_user: CurrentUser,
+    service: Annotated[VulnerabilityService, Depends(get_service)],
+    scope: VulnScope,
+):
+    return await lead_cache.cached(
+        service.session,
+        name="overview:vulnerabilities",
+        scans=scope.ids,
+        facets="",
+        model=ScanVulnerabilities,
+        build=lambda: service.overview(scope),
+    )
+
+
+@router.get("/coverage", response_model=list[CoverageRead])
+async def vulnerability_coverage(
+    _current_user: CurrentUser,
+    service: Annotated[VulnerabilityService, Depends(get_service)],
+    scope: VulnScope,
+):
+    return await service.coverage(scope)
+
+
+@router.get("/surface", response_model=SurfaceSummary)
+async def vulnerability_surface(
+    _current_user: CurrentUser,
+    service: Annotated[VulnerabilityService, Depends(get_service)],
+    scope: VulnScope,
+):
+    return await ScanSurfaceService(service.session).summary(scope)
+
+
+@router.get("/{vulnerability_id}", response_model=VulnerabilityRead)
+async def get_vulnerability(
+    _current_user: CurrentUser,
+    service: Annotated[VulnerabilityService, Depends(get_service)],
+    vulnerability_id: Annotated[UUID, Path(description="Vulnerability ID")],
+    scope: VulnScope,
+):
+    found = await service.get(scope, vulnerability_id)
+    if found is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found"
+        )
+    return found
+
+
+@router.post("/triage/bulk", response_model=BulkTriageResult)
+async def triage_many(
+    current_user: CurrentUser,
+    service: Annotated[VulnerabilityService, Depends(get_service)],
+    scope: VulnScope,
+    body: BulkTriageUpdate,
+):
+    _check_state(body.state)
+    return await service.triage_many(scope, body, current_user.id)
+
+
+@router.patch("/triage/{fingerprint}", response_model=TriageResult)
+async def triage_vulnerability(
+    current_user: CurrentUser,
+    service: Annotated[VulnerabilityService, Depends(get_service)],
+    fingerprint: Annotated[str, Path(description="Finding fingerprint", max_length=64)],
+    scope: VulnScope,
+    body: TriageUpdate,
+):
+    _check_state(body.state)
+    result = await service.triage(scope, fingerprint, body, current_user.id)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found"
+        )
+    return result

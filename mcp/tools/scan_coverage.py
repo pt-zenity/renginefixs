@@ -1,0 +1,95 @@
+"""What actually ran."""
+
+from __future__ import annotations
+
+from pydantic import Field
+
+from mcp import links
+from mcp.context import ToolContext
+from mcp.dimensions import DIMENSIONS, dimension
+from mcp.result import ToolResult
+from mcp.tools._scope import resolve
+from mcp.tools.base import Tool, ToolGroup, ToolInput
+from shared.definitions.surface import SurfaceDimension
+from shared.utils.text import counted
+
+_COVERAGE_DIMENSIONS = (
+    SurfaceDimension.VULNERABILITIES.value,
+    SurfaceDimension.ENDPOINTS.value,
+)
+
+
+class Input(ToolInput):
+    target: str = Field(description="The target to report coverage for.")
+    dimension: str = Field(
+        default=SurfaceDimension.VULNERABILITIES.value,
+        description=(
+            f"Which run to account for. One of: {', '.join(_COVERAGE_DIMENSIONS)}."
+        ),
+    )
+
+
+class ScanCoverage(Tool):
+    name = "scan_coverage"
+    title = "Scan coverage"
+    group = ToolGroup.EXPLAIN.value
+    description = (
+        "The scanner's account of a run: checks selected and loaded, hosts scanned, "
+        "requests sent, errors and hosts abandoned. A null count means the scanner "
+        "did not report that number."
+    )
+    Input = Input
+    examples = ("scan_coverage target=example.com",)
+
+    async def run(self, ctx: ToolContext, args: Input) -> ToolResult:
+        dim = dimension(args.dimension)
+        scope = await resolve(ctx, args.target)
+        scan_id = scope.require(dim)
+
+        service = dim.service(ctx.session)
+        rows = await service.coverage(scan_id)
+
+        runs = [
+            {
+                k: v
+                for k, v in row.model_dump(mode="json").items()
+                if v not in (None, [], {}, "")
+            }
+            for row in rows
+        ]
+        partial = [r for r in runs if r.get("status") not in ("completed", None)]
+
+        summary_line = f"{counted(len(runs), 'run')} recorded for {dim.label}"
+        if partial:
+            summary_line += f", {len(partial)} incomplete"
+
+        caveats = list(scope.caveat(dim))
+        caveats.append("A null count means the scanner did not report it.")
+        shortfall = sum(
+            max(0, (r.get("templates_selected") or 0) - r["templates_loaded"])
+            for r in runs
+            if r.get("templates_loaded") is not None
+        )
+        if shortfall:
+            caveats.append(f"{counted(shortfall, 'selected check')} did not load.")
+        if not runs:
+            caveats.append("No coverage rows exist.")
+
+        return ToolResult(
+            summary=summary_line,
+            data={
+                "dimension": dim.key,
+                "scan_id": str(scan_id),
+                "runs": runs,
+                "surface": [
+                    {
+                        "dimension": d.key,
+                        "covered": scope.coverage(d.key).covered,
+                        "count": scope.coverage(d.key).value,
+                    }
+                    for d in DIMENSIONS
+                ],
+            },
+            pivot=links.scan_tab(ctx.ui_base_url, scan_id, dim.tab),
+            caveats=caveats,
+        )

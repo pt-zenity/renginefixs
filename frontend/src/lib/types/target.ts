@@ -1,0 +1,217 @@
+import { SURFACE, SurfaceDimension } from '$lib/config/surface';
+import { TaskStatus } from './task-status';
+import type { WhoisLookupType } from './whois';
+
+export enum TargetType {
+	DOMAIN = 'domain',
+	IP = 'ip',
+	IP_RANGE = 'ip_range',
+	ASN = 'asn',
+	URL = 'url'
+}
+
+export interface WhoisSummaryData {
+	id: string;
+	query_value: string;
+	lookup_type: WhoisLookupType;
+	name: string;
+	registrant_name: string;
+	registrar_name: string;
+	country: string;
+	network_cidr: string;
+	registration_date: string | null;
+	expiration_date: string | null;
+	queried_at: string;
+}
+
+export interface DnsSummaryData {
+	id: string;
+	host: string;
+	status_code: string;
+	cdn: boolean;
+	cdn_name: string;
+	queried_at: string;
+	record_counts: Record<string, number>;
+}
+
+export interface BgpSummaryData {
+	// ASN targets
+	prefix_count: number | null;
+	peer_count: number | null;
+	announced: boolean | null;
+
+	// IP / IP_RANGE targets
+	asn: number | null;
+	prefix: string | null;
+	holder: string | null;
+
+	queried_at: string;
+}
+
+export interface OrganizationSummary {
+	id: string;
+	name: string;
+	slug: string;
+}
+
+export interface TagSummary {
+	id: string;
+	name: string;
+	slug: string;
+	color: string;
+}
+
+export interface TargetBase {
+	target_value: string;
+	display_name?: string | null;
+}
+
+export interface Target extends TargetBase {
+	id: string;
+	target_type: TargetType;
+	project_id: string;
+	created_at: string;
+	updated_at: string;
+	created_by: string;
+	whois_status: TaskStatus;
+	whois_error: string | null;
+	whois_record_id: string | null;
+	whois: WhoisSummaryData | null;
+	bgp_status: TaskStatus;
+	bgp: BgpSummaryData | null;
+	dns_status: TaskStatus;
+	dns_error: string | null;
+	dns_lookup_id: string | null;
+	dns: DnsSummaryData | null;
+	organizations: OrganizationSummary[];
+	tags: TagSummary[];
+	seed_scans: boolean;
+	new_checks: boolean;
+	seed_count: number | null;
+}
+
+export type SeedKind = 'host' | 'address' | 'url';
+
+export interface TargetSeed {
+	id: string;
+	kind: SeedKind;
+	value: string;
+	created_at: string;
+}
+
+export interface TargetSeedRejection {
+	value: string;
+	reason: string;
+}
+
+export interface TargetSeedResult {
+	total: number;
+	added: number;
+	removed: number;
+	rejected: TargetSeedRejection[];
+}
+
+export interface TargetCreate extends TargetBase {
+	project_slug: string;
+	organization_names?: string[];
+	tag_names?: string[];
+	seeds?: string[];
+}
+
+export interface TargetUpdate {
+	display_name?: string | null;
+	organization_names?: string[] | null;
+	tag_names?: string[] | null;
+	seed_scans?: boolean | null;
+	new_checks?: boolean | null;
+}
+
+export interface TargetValidationRequest {
+	target_value: string;
+}
+
+export interface TargetValidationResponse {
+	valid: boolean;
+	target_type: TargetType | null;
+	error: string | null;
+	target_value: string;
+}
+
+export interface TargetBulkCreateRequest {
+	project_slug: string;
+	targets: string[];
+	organization_names?: string[];
+	tag_names?: string[];
+}
+
+export interface TargetImportItem {
+	target_value: string;
+	tags?: string[];
+	organizations?: string[];
+	display_name?: string | null;
+}
+
+export interface TargetImportRequest {
+	project_slug: string;
+	targets: TargetImportItem[];
+	organization_names?: string[];
+	tag_names?: string[];
+}
+
+export interface TargetImportResult {
+	target_value: string;
+	success: boolean;
+	target_type: TargetType | null;
+	target_id: string | null;
+	error: string | null;
+	duplicate: boolean;
+}
+
+export interface TargetBulkCreateResponse {
+	total: number;
+	imported: number;
+	failed: number;
+	skipped_duplicates: number;
+	results: TargetImportResult[];
+}
+
+export interface TargetPreviewItem {
+	target_value: string;
+	target_type?: TargetType | null;
+	tags?: string[];
+	organizations?: string[];
+	display_name?: string | null;
+	error?: string;
+}
+
+export interface EnrichmentRefreshResponse {
+	target_id: string;
+	enrichment_type: string;
+	status: string;
+	message: string;
+}
+
+export function getTargetTypeColor(_type: TargetType): string {
+	return 'bg-muted/60 text-foreground/70 border-border/60';
+}
+
+export function formatTargetType(type: TargetType): string {
+	return type.replace('_', ' ').toUpperCase();
+}
+
+const TARGET_TYPE_PLURALS: Record<string, string> = {
+	[TargetType.DOMAIN]: 'Domains',
+	[TargetType.IP]: 'IPs',
+	[TargetType.IP_RANGE]: 'IP ranges',
+	[TargetType.ASN]: 'ASNs',
+	[TargetType.URL]: 'URLs'
+};
+
+export function formatTargetTypePlural(type: TargetType): string {
+	return TARGET_TYPE_PLURALS[type] ?? `${formatTargetType(type)}s`;
+}
+
+export function targetAssetNoun(_type: string, count = 2): string {
+	const spec = SURFACE[SurfaceDimension.WEB_ASSETS];
+	return count === 1 ? spec.noun : spec.nounPlural;
+}

@@ -1,0 +1,130 @@
+import shlex
+
+from pydantic import BaseModel
+
+MAX_TOOL_OPTION_LEN = 1000
+
+
+def parse_tool_args(raw: str) -> list[str]:
+    """shlex-split custom tool args for execution."""
+    if not raw:
+        return []
+    try:
+        return shlex.split(raw)
+    except ValueError:
+        return []
+
+
+class ToolSpec(BaseModel):
+    name: str
+    label: str
+    phase: str
+    example: str
+
+
+SCAN_TOOLS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        name="subfinder",
+        label="Subfinder",
+        phase="Subdomain Discovery",
+        example="-all -recursive -timeout 30",
+    ),
+    ToolSpec(
+        name="amass",
+        label="Amass",
+        phase="Subdomain Discovery",
+        example="-active",
+    ),
+    ToolSpec(
+        name="github-subdomains",
+        label="GitHub Subdomains",
+        phase="Subdomain Discovery",
+        example="-e",
+    ),
+    ToolSpec(
+        name="assetfinder",
+        label="Assetfinder",
+        phase="Subdomain Discovery",
+        example="--subs-only",
+    ),
+    ToolSpec(
+        name="tlsx",
+        label="TLSX",
+        phase="TLS / Certificates",
+        example="-cn -san",
+    ),
+    ToolSpec(
+        name="katana",
+        label="Katana",
+        phase="URL Discovery",
+        example="-jc -kf all -aff",
+    ),
+    ToolSpec(
+        name="urlfinder",
+        label="URLFinder",
+        phase="URL Discovery",
+        example="-all",
+    ),
+    ToolSpec(
+        name="dnsx",
+        label="DNSX",
+        phase="DNS Resolution",
+        example="-rcode noerror",
+    ),
+    ToolSpec(
+        name="alterx",
+        label="Alterx",
+        phase="Subdomain Discovery",
+        example="-p '{{sub}}-{{word}}.{{suffix}}'",
+    ),
+    ToolSpec(
+        name="naabu",
+        label="Naabu",
+        phase="Port Scan",
+        example="-scan-all-ips -sn",
+    ),
+    ToolSpec(
+        name="httpx",
+        label="HTTPX",
+        phase="HTTP Probe",
+        example="-favicon -jarm",
+    ),
+    ToolSpec(
+        name="nuclei",
+        label="Nuclei",
+        phase="Vulnerability Scan",
+        example="-etags intrusive -exclude-severity info",
+    ),
+    ToolSpec(
+        name="dalfox",
+        label="Dalfox",
+        phase="Fuzzing",
+        example="--skip-ast-analysis",
+    ),
+    ToolSpec(
+        name="ffuf",
+        label="ffuf",
+        phase="URL Discovery",
+        example="-mc 200,204,301,302",
+    ),
+    ToolSpec(
+        name="wafw00f",
+        label="wafw00f",
+        phase="WAF Detection",
+        example="-a",
+    ),
+    ToolSpec(
+        name="cdncheck",
+        label="cdncheck",
+        phase="CDN Attribution",
+        example="-resp",
+    ),
+    ToolSpec(
+        name="julius",
+        label="julius",
+        phase="AI Detection",
+        example="--base-paths /api,/proxy",
+    ),
+)
+
+TOOL_NAMES: frozenset[str] = frozenset(t.name for t in SCAN_TOOLS)

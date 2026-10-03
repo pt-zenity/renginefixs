@@ -1,0 +1,95 @@
+from __future__ import annotations
+
+import pytest
+
+from app.services.subdomain import _RELATION_CAP, SubdomainService
+from shared.definitions.correlation import MIN_ESTATE_FOR_COMMON
+from shared.enums.ip import IpSource
+from shared.models.ip_address import IpAddress
+
+pytestmark = pytest.mark.api
+
+
+async def _related(estate, scan: str, name: str) -> dict:
+    rows = await SubdomainService(estate.session).related(
+        estate.project_id, estate.scans[scan], name
+    )
+    return {row.kind: row for row in rows}
+
+
+async def test_a_shared_address_is_a_relation(estate, now):
+    await estate.scan("example.com", "run", at=now)
+    await estate.hosts(
+        "run", ["a.example.com", "b.example.com"], at=now, ips=["10.0.0.1"]
+    )
+    await estate.hosts("run", ["c.example.com"], at=now, ips=["10.0.0.9"])
+
+    rows = await _related(estate, "run", "a.example.com")
+
+    assert rows["ip"].hosts == ["b.example.com"]
+    assert rows["ip"].total == 1
+
+
+async def test_the_count_is_the_truth_not_the_length_of_the_list(estate, now):
+    await estate.scan("example.com", "run", at=now)
+    names = [f"h{i}.example.com" for i in range(_RELATION_CAP + 40)]
+    await estate.hosts("run", names, at=now, cname="edge.example.net")
+    await estate.hosts(
+        "run",
+        [f"other{i}.example.com" for i in range(_RELATION_CAP * 3)],
+        at=now,
+        cname="other.example.net",
+    )
+
+    rows = await _related(estate, "run", names[0])
+
+    assert len(rows["cname"].hosts) == _RELATION_CAP
+    assert rows["cname"].total == len(names) - 1
+
+
+async def test_a_value_the_whole_estate_shares_is_not_a_relation(estate, now):
+    await estate.scan("example.com", "run", at=now)
+    names = [f"h{i}.example.com" for i in range(MIN_ESTATE_FOR_COMMON + 10)]
+    await estate.hosts("run", names, at=now, cname="everything.example.net")
+
+    rows = await _related(estate, "run", names[0])
+
+    assert "cname" not in rows
+
+
+async def test_a_small_scan_suppresses_nothing(estate, now):
+    await estate.scan("example.com", "run", at=now)
+    names = [f"h{i}.example.com" for i in range(4)]
+    await estate.hosts("run", names, at=now, cname="edge.example.net")
+
+    rows = await _related(estate, "run", names[0])
+
+    assert rows["cname"].total == 3
+
+
+async def test_a_shared_edge_is_the_provider_not_a_relation(estate, now):
+    await estate.scan("example.com", "run", at=now)
+    await estate.hosts(
+        "run",
+        ["a.example.com", "b.example.com"],
+        at=now,
+        ips=["151.101.2.132"],
+        cname="j.sni.global.fastly.net",
+    )
+    sid = estate.scans["run"]
+    estate.session.add(
+        IpAddress(
+            project_id=estate.project_id,
+            scan_id=sid,
+            target_id=await estate._target_of(sid),
+            ip="151.101.2.132",
+            version=4,
+            source=IpSource.DNS_RESOLUTION.value,
+            is_cdn=True,
+            cdn_name="fastly",
+            discovered_at=now,
+        )
+    )
+    await estate.session.flush()
+
+    assert await _related(estate, "run", "a.example.com") == {}

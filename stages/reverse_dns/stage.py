@@ -1,0 +1,96 @@
+from __future__ import annotations
+
+from sqlalchemy import select
+
+from shared.definitions.intensity import TransportTool
+from shared.enums.scan import AssetKind, Phase, StageGroup, StageRole
+from shared.logging import get_logger
+from shared.models.ip_address import IpAddress
+from shared.services.scope_filter import ip_excluded
+from stages.base import ALL_TARGETS, Stage, StageResult
+from stages.reverse_dns.config import ReverseDnsConfig
+from tools.dnsx.client import DnsxClient, DnsxError
+from tools.dnsx.parser import parse_dnsx_jsonl
+
+logger = get_logger(__name__)
+
+_MAX_PTR = 8192
+
+
+class ReverseDnsStage(Stage):
+    name = "reverse_dns"
+    title = "Reverse DNS"
+    description = "Resolve PTR records for every discovered IP."
+    phase = Phase.DISCOVERY.value
+    depends_on = frozenset({"host_discovery", "seed_resolution"})
+    group = StageGroup.ADDRESSES.value
+    role = StageRole.SUPPORT.value
+    consumes = frozenset({AssetKind.ADDRESSES.value})
+    produces = frozenset({AssetKind.HOSTS.value})
+    applies_to = ALL_TARGETS
+    tools = ("dnsx",)
+    transport_tool = TransportTool.DNSX.value
+    touches_target = False
+    config_model = ReverseDnsConfig
+
+    def run(self) -> StageResult:
+        self._check_abort()
+        rows = list(
+            self.session.execute(
+                select(IpAddress).where(IpAddress.scan_id == self.ctx.scan_id)
+            )
+            .scalars()
+            .all()
+        )
+        excluded = self.ctx.resolved.excluded_ips or []
+        if excluded:
+            rows = [row for row in rows if not ip_excluded(row.ip, excluded)]
+        if not rows:
+            return StageResult(counts={"ptr": 0})
+
+        by_ip = {row.ip: row for row in rows}
+        ips = list(by_ip.keys())[:_MAX_PTR]
+        ptr_map, note = self._lookup_ptr(ips)
+
+        resolved = 0
+        for ip, names in ptr_map.items():
+            row = by_ip.get(ip)
+            if row is not None and names:
+                row.ptr_hostnames = names
+                self.session.add(row)
+                resolved += 1
+        self.session.commit()
+        self.emit_progress(f"reverse-DNS resolved {resolved}/{len(ips)} IPs")
+        return StageResult(
+            counts={"ptr": resolved},
+            warnings=[note] if note else [],
+            partial=bool(note),
+        )
+
+    def _lookup_ptr(self, ips: list[str]) -> tuple[dict[str, list], str | None]:
+        if not ips:
+            return {}, None
+        try:
+            client = DnsxClient(
+                timeout=max(120, self.transport.timeout),
+                threads=self.transport.threads,
+                query_timeout=self.transport.timeout,
+                recorder=self.ctx.recorder,
+                extra_args=self.ctx.resolved.tool_args("dnsx"),
+            )
+        except DnsxError:
+            logger.warning("dnsx unavailable, skipping reverse DNS")
+            return {}, f"dnsx unavailable. No PTR lookup for {len(ips):,} addresses."
+
+        result = client.ptr(ips)
+        out: dict[str, list] = {}
+        for rec in parse_dnsx_jsonl(result.json_records):
+            if rec.ptr:
+                out[rec.host] = list(rec.ptr)
+        note = None
+        if not result.success:
+            kind = "timed out" if result.timed_out else "failed"
+            note = (
+                f"dnsx {kind}. PTR resolved for {len(out):,} of {len(ips):,} addresses."
+            )
+        return out, note

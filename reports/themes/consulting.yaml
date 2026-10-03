@@ -1,0 +1,42 @@
+key: consulting
+name: Consulting
+description: Blue band cover, serif headings, ruled tables.
+author: reNgine
+version: "3"
+color:
+  page: "#ffffff"
+  ink: "#242b34"
+  ink_soft: "#6a717a"
+  ink_faint: "#8e949c"
+  rule: "#eaedf1"
+  rule_strong: "#d9dde3"
+  surface: "#f5f8fb"
+  surface_soft: "#fafcfd"
+  accent: "#266a9c"
+  accent_soft: "#eef7fd"
+  accent_ink: "#ffffff"
+type:
+  heading: source-serif
+  body: inter
+  mono: ibm-plex-mono
+  base_size: 10.5
+  scale: 1.24
+  line_height: 1.62
+  heading_weight: 600
+  heading_tracking: -0.004
+  label_tracking: 0.02
+  uppercase_labels: false
+layout:
+  rule_width: 0.5
+  radius: 3
+  pill: true
+  block_gap: 1.15
+  table: boxed
+  finding: card
+  heading: numbered
+cover:
+  layout: band
+  art: none
+  ink: light
+  background: "#1d4f74"
+  accent_bar: true

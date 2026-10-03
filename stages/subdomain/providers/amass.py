@@ -1,0 +1,48 @@
+from __future__ import annotations
+
+import math
+import re
+
+from shared.enums.subdomain import SubdomainSource
+from shared.services.proxy_resolve import proxy_env
+from stages.subdomain.providers.base import SubdomainProvider
+from tools.runner import CLIToolRunner, OutputFormat, ToolNotFoundError
+
+_FQDN_RE = re.compile(r"([A-Za-z0-9_.-]+) \(FQDN\)")
+
+
+class AmassProvider(SubdomainProvider):
+    """Passive subdomain enumeration via amass enum -passive."""
+
+    tool = "amass"
+    source = SubdomainSource.AMASS
+    binary = "amass"
+
+    def discover(self) -> set[str]:
+        runner = CLIToolRunner(self.binary, default_timeout=self.ctx.timeout)
+        timeout_min = max(1, math.ceil(self.ctx.timeout / 60))
+        try:
+            result = runner.run(
+                args=[
+                    "enum",
+                    "-passive",
+                    "-d",
+                    self.ctx.domain,
+                    "-nocolor",
+                    "-timeout",
+                    str(timeout_min),
+                ],
+                output_format=OutputFormat.PLAIN,
+                silent=False,
+                timeout=self.ctx.timeout,
+                env=proxy_env(self.ctx.proxy_url),
+                recorder=self.ctx.recorder,
+                tool=self.tool,
+                extra_args=self.extra_args,
+            )
+        except ToolNotFoundError:
+            return set()
+        names: set[str] = set()
+        for line in result.output_lines:
+            names.update(_FQDN_RE.findall(line))
+        return names

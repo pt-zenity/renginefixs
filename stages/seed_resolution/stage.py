@@ -1,0 +1,226 @@
+from __future__ import annotations
+
+import ipaddress
+
+from sqlalchemy import delete
+
+from shared.enums.ip import IpSource
+from shared.enums.scan import AssetKind, Phase, StageGroup, StageRole
+from shared.enums.target import TargetType
+from shared.logging import get_logger
+from shared.models.ip_address import IpAddress
+from shared.services.scope_filter import ip_excluded
+from shared.utils.cidr import expand_network, parse_network
+from shared.utils.datetime import utc_now
+from shared.utils.validation import normalize_domain
+from stages.base import IP_TARGETS, Stage, StageResult, parse_asn
+from stages.seed_resolution.config import SeedResolutionConfig
+from tools.dnsx.service import DnsxLookupError, DnsxService
+from tools.ripestat.service import RIPEStatError, RIPEStatService
+
+logger = get_logger(__name__)
+
+_MAX_ASN_PREFIXES = 256
+
+
+class SeedResolutionStage(Stage):
+    name = "seed_resolution"
+    title = "Seed Resolution"
+    description = "Expand an IP, netblock, ASN or URL seed into individual addresses."
+    phase = Phase.DISCOVERY.value
+    group = StageGroup.ADDRESSES.value
+    role = StageRole.SUPPORT.value
+    produces = frozenset({AssetKind.ADDRESSES.value})
+    applies_to = IP_TARGETS | {TargetType.URL.value}
+    touches_target = False
+    tools = ("dnsx",)
+    config_model = SeedResolutionConfig
+    _dropped: int = 0
+
+    def run(self) -> StageResult:
+        self._check_abort()
+        self._dropped = 0
+        cfg = self.cfg
+        value = self.ctx.target_value.strip()
+
+        if self.ctx.target_type == TargetType.IP.value:
+            records, truncated = self._from_ip(value), False
+        elif self.ctx.target_type == TargetType.IP_RANGE.value:
+            records, truncated = self._from_cidr(value, cfg)
+        elif self.ctx.target_type == TargetType.URL.value:
+            records, truncated = self._from_url(value), False
+        else:
+            records, truncated = self._from_asn(value, cfg)
+
+        self._check_abort()
+        count = self._persist(records)
+        if not count:
+            reason = f"{value} expanded to no addresses."
+            self.emit_progress(reason)
+            return StageResult(counts={"ips": 0}, warnings=[reason], partial=True)
+
+        self.emit_progress(f"discovered {count} IP assets")
+        if truncated or self._dropped:
+            warning = self._sample_note(value, count, cfg)
+            self.emit_progress(warning)
+            return StageResult(counts={"ips": count}, warnings=[warning], partial=True)
+        return StageResult(counts={"ips": count})
+
+    def _sample_note(self, value: str, count: int, cfg: SeedResolutionConfig) -> str:
+        note = (
+            f"{count:,} addresses sampled from {value} in {cfg.asn_scan_mode} mode. "
+            "Results describe the sample."
+        )
+        if self._dropped:
+            note += f" {self._dropped:,} announced prefixes were left out."
+        return note
+
+    def _from_ip(self, value: str) -> list[dict]:
+        try:
+            addr = ipaddress.ip_address(value)
+        except ValueError:
+            logger.warning("invalid IP seed: %s", value)
+            return []
+        return [
+            {
+                "ip": str(addr),
+                "version": addr.version,
+                "source": IpSource.SEED.value,
+                "prefix": None,
+                "asn": None,
+            }
+        ]
+
+    def _from_url(self, value: str) -> list[dict]:
+        """Addresses of the host a URL names."""
+        host = normalize_domain(value)
+        if not host:
+            return []
+        try:
+            addr = ipaddress.ip_address(host)
+        except ValueError:
+            pass
+        else:
+            return self._from_ip(str(addr))
+        try:
+            recon = DnsxService(
+                recorder=self.ctx.recorder,
+                extra_args=self.ctx.resolved.tool_args("dnsx"),
+            ).do_recon(host)
+        except DnsxLookupError as exc:
+            logger.warning("URL seed %s did not resolve: %s", host, exc)
+            return []
+        return [
+            {
+                "ip": ip,
+                "version": ipaddress.ip_address(ip).version,
+                "source": IpSource.SEED.value,
+                "prefix": None,
+                "asn": None,
+            }
+            for ip in [*recon.a, *recon.aaaa]
+        ]
+
+    def _from_cidr(
+        self, value: str, cfg: SeedResolutionConfig
+    ) -> tuple[list[dict], bool]:
+        net = parse_network(value)
+        if net is None:
+            logger.warning("invalid CIDR seed: %s", value)
+            return [], False
+        ips, truncated = expand_network(
+            value,
+            max_hosts=cfg.max_expansion_hosts,
+            skip_private=False,
+        )
+        prefix = str(net)
+        records = [
+            {
+                "ip": ip,
+                "version": net.version,
+                "source": IpSource.CIDR_EXPANSION.value,
+                "prefix": prefix,
+                "asn": None,
+            }
+            for ip in ips
+        ]
+        return records, truncated
+
+    def _from_asn(
+        self, value: str, cfg: SeedResolutionConfig
+    ) -> tuple[list[dict], bool]:
+        announced = self._asn_prefixes(value)
+        prefixes = announced[:_MAX_ASN_PREFIXES]
+        self._dropped = len(announced) - len(prefixes)
+        if not prefixes:
+            logger.warning("no announced prefixes for %s", value)
+            return [], False
+        asn = parse_asn(value)
+        per_prefix = max(cfg.max_expansion_hosts // len(prefixes), 1)
+        records: list[dict] = []
+        truncated = False
+        for prefix in prefixes:
+            if len(records) >= cfg.max_expansion_hosts:
+                truncated = True
+                break
+            net = parse_network(prefix)
+            if net is None:
+                continue
+            ips, was_truncated = expand_network(
+                prefix, max_hosts=per_prefix, skip_private=True
+            )
+            truncated = truncated or was_truncated
+            records.extend(
+                {
+                    "ip": ip,
+                    "version": net.version,
+                    "source": IpSource.ASN_EXPANSION.value,
+                    "prefix": prefix,
+                    "asn": asn,
+                }
+                for ip in ips
+            )
+        return records, truncated
+
+    def _asn_prefixes(self, value: str) -> list[str]:
+        svc = RIPEStatService(proxy_url=self.ctx.resolved.proxy_url)
+        try:
+            result = svc.announced_prefixes_sync(self.session, value, cached_only=True)
+            if result is None:
+                result = svc.announced_prefixes_sync(
+                    self.session, value, cached_only=False
+                )
+        except RIPEStatError as exc:
+            logger.warning("ASN prefix lookup failed for %s: %s", value, exc)
+            return []
+        if result is None:
+            return []
+        return [p.prefix for p in result.data if getattr(p, "prefix", None)]
+
+    def _persist(self, records: list[dict]) -> int:
+        self.session.execute(
+            delete(IpAddress).where(IpAddress.scan_id == self.ctx.scan_id)
+        )
+        now = utc_now()
+        seen: set[str] = set()
+        excluded = self.ctx.resolved.excluded_ips or []
+        for rec in records:
+            ip = rec["ip"]
+            if ip in seen or (excluded and ip_excluded(ip, excluded)):
+                continue
+            seen.add(ip)
+            self.session.add(
+                IpAddress(
+                    scan_id=self.ctx.scan_id,
+                    target_id=self.ctx.target_id,
+                    project_id=self.ctx.project_id,
+                    ip=ip,
+                    version=rec["version"],
+                    source=rec["source"],
+                    prefix=rec.get("prefix"),
+                    asn=rec.get("asn"),
+                    discovered_at=now,
+                )
+            )
+        self.session.commit()
+        return len(seen)

@@ -1,0 +1,67 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+
+from shared.enums.scan import Intensity
+
+
+class Preset(StrEnum):
+    STANDARD = "standard"
+    PASSIVE = "passive"
+    FULL = "full"
+    BLANK = "blank"
+
+
+@dataclass(frozen=True)
+class PresetSpec:
+    name: str
+    title: str
+    description: str
+    intensity: str = Intensity.NORMAL.value
+
+
+PRESETS: tuple[PresetSpec, ...] = (
+    PresetSpec(
+        Preset.STANDARD.value,
+        "Standard Recon",
+        "Every stage at its default settings.",
+    ),
+    PresetSpec(
+        Preset.PASSIVE.value,
+        "Passive Recon",
+        "Only stages that send no traffic to the target.",
+        Intensity.PASSIVE.value,
+    ),
+    PresetSpec(
+        Preset.FULL.value,
+        "Full Sweep",
+        "Every stage enabled.",
+    ),
+    PresetSpec(
+        Preset.BLANK.value,
+        "Blank",
+        "No stages enabled.",
+    ),
+)
+
+
+def preset_stages(name: str) -> dict[str, dict]:
+    from stages.registry import stages  # noqa: PLC0415
+
+    if name == Preset.STANDARD.value:
+        return {}
+    return {
+        spec.name: {"enabled": _enabled(name, spec)}
+        for spec in stages()
+        if not (spec.catalog_hidden or spec.always_on)
+        and _enabled(name, spec) != spec.defaults["enabled"]
+    }
+
+
+def _enabled(preset: str, spec) -> bool:
+    if preset == Preset.FULL.value:
+        return True
+    if preset == Preset.BLANK.value:
+        return False
+    return not spec.touches_target or spec.passive_capable

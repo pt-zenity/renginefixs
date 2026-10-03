@@ -1,0 +1,72 @@
+<script lang="ts">
+	import { untrack } from 'svelte';
+	import { Badge } from '$lib/components/ui/badge';
+	import { Button } from '$lib/components/ui/button';
+	import MultiSelectCombobox from '$lib/components/multi-select-combobox.svelte';
+	import { vulnTemplatesApi } from '$lib/api/vulnerabilities';
+	import { ROUTES } from '$lib/config/routes';
+	import { emptyTemplateFilter } from '$lib/types/vuln-template';
+	import type { VulnTemplateRead } from '$lib/types/vuln-template';
+
+	interface Props {
+		id: string;
+		value: string[];
+		onChange: (value: string[]) => void;
+	}
+
+	let { id, value, onChange }: Props = $props();
+
+	let templates = $state<VulnTemplateRead[]>([]);
+	let loaded = $state(false);
+	let failed = $state(false);
+
+	$effect(() => {
+		untrack(() => {
+			vulnTemplatesApi
+				.search({ ...emptyTemplateFilter(), origins: ['custom'], limit: 200 })
+				.then((res) => {
+					templates = res.items;
+					failed = false;
+				})
+				.catch(() => {
+					templates = [];
+					failed = true;
+				})
+				.finally(() => (loaded = true));
+		});
+	});
+
+	let items = $derived(templates.map((t) => ({ id: t.id, label: t.name })));
+	let selected = $derived(
+		value.map((id) => ({ id, label: templates.find((t) => t.id === id)?.name ?? id }))
+	);
+</script>
+
+{#if loaded && failed}
+	<p class="w-[280px] text-right text-2xs text-destructive">Templates not loaded.</p>
+{:else if loaded && templates.length === 0}
+	<div class="w-[280px] text-right">
+		<p class="text-2xs text-muted-foreground">No uploaded templates.</p>
+		<Button variant="link" size="sm" class="h-auto px-0 text-2xs" href={ROUTES.arsenal('nuclei')}>
+			Upload one in the Tools Arsenal
+		</Button>
+	</div>
+{:else}
+	<div class="w-[280px] space-y-1">
+		<MultiSelectCombobox
+			{id}
+			{items}
+			{selected}
+			onSelect={(item) => onChange(value.includes(item.id) ? value : [...value, item.id])}
+			onRemove={(item) => onChange(value.filter((v) => v !== item.id))}
+			allowCreate={false}
+			placeholder="Search templates…"
+			emptyText="No uploaded templates match."
+		/>
+		{#if value.length}
+			<Badge variant="secondary" class="text-2xs font-normal">
+				{value.length} selected
+			</Badge>
+		{/if}
+	</div>
+{/if}

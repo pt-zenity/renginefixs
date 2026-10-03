@@ -1,0 +1,20 @@
+import { api } from './client';
+import { scopeQuery, type TargetScope } from '$lib/utilities/surface-scope';
+import type { DomainPostureSummary } from '$lib/types/domain-posture';
+
+export const domainPostureApi = {
+	async scan(projectId: string, scanId: string): Promise<DomainPostureSummary> {
+		return api.get<DomainPostureSummary>(`/domain-posture?${scopeQuery({ projectId, scanId })}`);
+	},
+
+	async project(projectId: string, scope: TargetScope = {}): Promise<DomainPostureSummary> {
+		return api.get<DomainPostureSummary>(
+			`/domain-posture/project?${scopeQuery({ projectId, ...scope })}`
+		);
+	},
+
+	async target(projectId: string, targetId: string): Promise<DomainPostureSummary> {
+		const sp = new URLSearchParams({ project_id: projectId });
+		return api.get<DomainPostureSummary>(`/domain-posture/target/${targetId}?${sp.toString()}`);
+	}
+};

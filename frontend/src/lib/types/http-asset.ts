@@ -1,0 +1,92 @@
+export interface HttpAssetRead {
+	id: string;
+	scan_id: string;
+	target_id: string;
+	url: string;
+	final_url: string | null;
+	host: string;
+	port: number;
+	scheme: string;
+	method: string | null;
+	path: string | null;
+	status_code: number | null;
+	chain_status_codes: number[];
+	title: string | null;
+	webserver: string | null;
+	content_type: string | null;
+	content_length: number | null;
+	location: string | null;
+	response_time: number | null;
+	words: number | null;
+	lines: number | null;
+	tech: string[];
+	cpe: string[];
+	favicon_hash: string | null;
+	content_hash: string | null;
+	header_hash: string | null;
+	jarm: string | null;
+	supports_http2: boolean;
+	supports_pipeline: boolean;
+	ip: string | null;
+	a_records: string[];
+	aaaa_records: string[];
+	cname: string | null;
+	asn: number | null;
+	asn_org: string | null;
+	is_cdn: boolean;
+	cdn_name: string | null;
+	cdn_type: string | null;
+	waf: string | null;
+	tls_version: string | null;
+	tls_cipher: string | null;
+	tls_subject_cn: string | null;
+	tls_sans: string[];
+	tls_issuer: string | null;
+	tls_issuer_org: string | null;
+	tls_serial: string | null;
+	tls_fingerprint: string | null;
+	tls_not_before: string | null;
+	tls_not_after: string | null;
+	tls_expired: boolean | null;
+	tls_self_signed: boolean | null;
+	screenshot_path: string | null;
+	body_preview: string | null;
+	hygiene_issues: string[];
+	hygiene_checked: string[];
+	ai_checked?: boolean;
+	ai_service?: string | null;
+	ai_category?: string | null;
+	ai_endpoint?: string | null;
+	ai_models?: string[];
+	discovered_at: string;
+}
+
+export interface HygieneVerdict {
+	key: string;
+	failed: boolean;
+	evidence: string | null;
+}
+
+export interface AssetSurface {
+	state: string;
+	representative_id: string | null;
+	representative_value: string | null;
+	cluster_signals: string[];
+	members: number;
+	drop_reason: string | null;
+	tiers_planned: string[];
+	tiers_done: Record<string, string>;
+	tags: string[];
+	note: string | null;
+}
+
+export interface HttpAssetDetail extends HttpAssetRead {
+	tls_subject_dn: string | null;
+	tls_issuer_cn: string | null;
+	raw_request: string | null;
+	raw_response_header: string | null;
+	response_body: string | null;
+	response_headers: Record<string, string | string[]>;
+	hygiene: HygieneVerdict[];
+	surface: AssetSurface | null;
+}

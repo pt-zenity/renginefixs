@@ -1,0 +1,47 @@
+<script lang="ts">
+	import ExternalLink from '@lucide/svelte/icons/external-link';
+
+	type ImportType = 'text' | 'json' | 'csv';
+	let { type }: { type: ImportType } = $props();
+</script>
+
+<p class="text-xs text-muted-foreground">
+	<span class="inline-flex flex-wrap items-center gap-1">
+		{#if type === 'text'}
+			Accepted targets: domain, IP address, CIDR range, ASN or URL.<a
+				href="https://rengine.wiki/import/targets"
+				target="_blank"
+				rel="noopener noreferrer"
+				class="inline-flex items-center gap-1 underline underline-offset-4 hover:text-foreground"
+			>
+				Supported target types
+				<ExternalLink class="h-3 w-3" />
+			</a>
+		{:else if type === 'json'}
+			Fields per target: <code>target_value</code>, <code>tags</code>,
+			<code>organizations</code>, <code>display_name</code>.
+			<a
+				href="https://rengine.wiki/import/json"
+				target="_blank"
+				rel="noopener noreferrer"
+				class="inline-flex items-center gap-1 underline underline-offset-4 hover:text-foreground"
+			>
+				Supported JSON import formats
+				<ExternalLink class="h-3 w-3" />
+			</a>
+		{:else if type === 'csv'}
+			Supported columns:
+			<code>target_value</code>, <code>tags</code>,
+			<code>organizations</code>, <code>display_name</code>. Headers are optional.
+			<a
+				href="https://rengine.wiki/import/csv"
+				target="_blank"
+				rel="noopener noreferrer"
+				class="inline-flex items-center gap-1 underline underline-offset-4 hover:text-foreground"
+			>
+				Supported CSV import formats
+				<ExternalLink class="h-3 w-3" />
+			</a>
+		{/if}
+	</span>
+</p>

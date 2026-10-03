@@ -1,0 +1,119 @@
+from fastapi import APIRouter
+
+from app.api.v1 import (
+    activity_logs,
+    ai,
+    api_keys,
+    auth,
+    bounty_programs,
+    bounty_reports,
+    celery_health,
+    connectors,
+    cves,
+    dashboard,
+    datasets,
+    domain_posture,
+    endpoints,
+    events,
+    exports,
+    http_assets,
+    instance_settings,
+    interest,
+    ip_addresses,
+    issue_trackers,
+    lookalikes,
+    mcp,
+    media,
+    notes,
+    notification_channels,
+    notifications,
+    oast,
+    onboarding,
+    organizations,
+    ports,
+    projects,
+    proxies,
+    remote_control,
+    reports,
+    ripestat,
+    scan_contexts,
+    scan_engines,
+    scan_schedules,
+    scans,
+    secrets,
+    software,
+    subdomains,
+    surface,
+    tags,
+    targets,
+    threat_intel,
+    toolbox,
+    totp,
+    tripwires,
+    users,
+    viewdns,
+    vuln_templates,
+    vulnerabilities,
+    whats_new,
+    whois,
+    wordlists,
+)
+
+router = APIRouter()
+
+router.include_router(auth.router)
+router.include_router(users.router)
+router.include_router(events.router)
+router.include_router(projects.router)
+router.include_router(organizations.router)
+router.include_router(targets.router)
+router.include_router(tags.router)
+router.include_router(activity_logs.router)
+router.include_router(notes.router)
+router.include_router(notifications.router)
+router.include_router(api_keys.router)
+router.include_router(whois.router)
+router.include_router(viewdns.router)
+router.include_router(ripestat.router)
+router.include_router(scan_engines.router)
+router.include_router(scan_contexts.router)
+router.include_router(scan_schedules.router)
+router.include_router(scans.router)
+router.include_router(subdomains.router)
+router.include_router(domain_posture.router)
+router.include_router(lookalikes.router)
+router.include_router(surface.router)
+router.include_router(mcp.router)
+router.include_router(remote_control.router)
+router.include_router(connectors.router)
+router.include_router(http_assets.router)
+router.include_router(ports.router)
+router.include_router(ip_addresses.router)
+router.include_router(endpoints.router)
+router.include_router(vulnerabilities.router)
+router.include_router(oast.router)
+router.include_router(vuln_templates.router)
+router.include_router(threat_intel.router)
+router.include_router(datasets.router)
+router.include_router(toolbox.router)
+router.include_router(interest.router)
+router.include_router(bounty_programs.router)
+router.include_router(bounty_reports.router)
+router.include_router(wordlists.router)
+router.include_router(media.router)
+router.include_router(exports.router)
+router.include_router(reports.router)
+router.include_router(software.router)
+router.include_router(secrets.router)
+router.include_router(cves.router)
+router.include_router(ai.router)
+router.include_router(dashboard.router)
+router.include_router(whats_new.router)
+router.include_router(celery_health.router)
+router.include_router(instance_settings.router)
+router.include_router(proxies.router)
+router.include_router(notification_channels.router)
+router.include_router(issue_trackers.router)
+router.include_router(tripwires.router)
+router.include_router(onboarding.router)
+router.include_router(totp.router)

@@ -1,0 +1,78 @@
+from __future__ import annotations
+
+from shared.definitions.endpoints import EndpointSource
+from shared.services.endpoint_inventory import EndpointObservation
+from stages.url_discovery.config import MAX_ARCHIVE_DOMAINS, MAX_URLS
+from stages.url_discovery.providers.base import ProviderResult, UrlProvider
+from tools.urlfinder.client import UrlfinderClient, UrlfinderError
+
+
+class ArchiveProvider(UrlProvider):
+    """URLs public archives recorded for this domain."""
+
+    source = EndpointSource.ARCHIVE.value
+    tool = "urlfinder"
+    binary = "urlfinder"
+    touches_target = False
+
+    def discover(self, result: ProviderResult) -> None:
+        domains = self.ctx.apex_domains[:MAX_ARCHIVE_DOMAINS]
+        if not domains:
+            return
+        try:
+            client = UrlfinderClient(
+                timeout=self.ctx.transport.timeout,
+                proxy_url=self.ctx.net.proxy_url,
+                recorder=self.ctx.recorder,
+                extra_args=self.extra_args,
+            )
+        except UrlfinderError as e:
+            raise RuntimeError(str(e)) from e
+
+        found = 0
+        seen: set[str] = set()
+        observations: list[EndpointObservation] = []
+        cap = MAX_URLS
+        scanned = 0
+
+        for domain in domains:
+            if self.aborted():
+                result.capped = True
+                result.cap_reason = "The scan was cancelled."
+                break
+            scanned += 1
+            for url in client.collect(domain):
+                found += 1
+                if url in seen:
+                    continue
+                seen.add(url)
+                if not self.in_scope(url):
+                    continue
+                if len(observations) >= cap:
+                    result.capped = True
+                    result.cap_reason = (
+                        f"Stopped at the {cap} URL limit for this provider."
+                    )
+                    break
+                observations.append(
+                    EndpointObservation(
+                        url=url,
+                        detail="Recorded by a public archive, not confirmed by this scan",
+                    )
+                )
+            if result.capped:
+                break
+
+        result.observations = observations
+        dropped = len(self.ctx.apex_domains) - len(domains)
+        if dropped > 0 and not result.cap_reason:
+            result.capped = True
+            result.cap_reason = (
+                f"{dropped} registrable domains not queried. Limit is "
+                f"{MAX_ARCHIVE_DOMAINS} domains."
+            )
+        result.urls_found = found
+        result.hosts_scanned = scanned
+        self.progress(
+            f"{len(result.observations)} archived urls across {scanned} domains"
+        )

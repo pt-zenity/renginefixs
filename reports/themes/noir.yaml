@@ -1,0 +1,42 @@
+key: noir
+name: Noir
+description: Dark paper throughout.
+author: reNgine
+version: "3"
+color:
+  page: "#12161e"
+  ink: "#e8ecf3"
+  ink_soft: "#a7aebb"
+  ink_faint: "#7d8593"
+  rule: "#242b37"
+  rule_strong: "#343d4c"
+  surface: "#1a2029"
+  surface_soft: "#161c25"
+  accent: "#8da5ff"
+  accent_soft: "#1e2745"
+  accent_ink: "#12161e"
+type:
+  heading: inter
+  body: inter
+  mono: jetbrains-mono
+  base_size: 10.5
+  scale: 1.24
+  line_height: 1.62
+  heading_weight: 600
+  heading_tracking: -0.02
+  label_tracking: 0.02
+  uppercase_labels: false
+layout:
+  rule_width: 0.5
+  radius: 5
+  pill: true
+  block_gap: 1.1
+  table: hairline
+  finding: rail
+  heading: numbered
+cover:
+  layout: full
+  art: mesh
+  ink: light
+  background: "#0b0e15"
+  accent_bar: true
